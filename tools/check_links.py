@@ -29,8 +29,16 @@ for _stream in (sys.stdout, sys.stderr):
 # 只检查这些标记内的链接：[文字](目标)
 LINK_RE = re.compile(r"\]\(([^)\s]+?)\)")
 SKIP_PREFIX = ("http://", "https://", "mailto:", "#", "data:")
-SKIP_DIRS = {".git", ".venv", "venv", "__pycache__", "node_modules",
-             "models", "audio", "downloads", "output", "logs"}
+# 这些目录要么是运行时产物，要么是第三方项目的副本（都被 .gitignore 排除）。
+# 必须跳过，否则本地跑会扫到几百个无关的 Markdown，报一堆无关的"断链"。
+SKIP_DIRS = {
+    # 版本控制 / 环境 / 缓存
+    ".git", ".venv", "venv", "__pycache__", "node_modules",
+    # 运行时产物
+    "models", "audio", "downloads", "output", "logs", "bench", "obsidian_vault",
+    # 对比实验用的第三方项目副本（不入库）
+    "v2n_env", "tube2note_env", "vendor", "output_v2n", "output_tube2note",
+}
 
 
 def find_markdown(root: pathlib.Path) -> list[pathlib.Path]:
