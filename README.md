@@ -8,6 +8,10 @@
   <img src="docs/preview-gui.png" width="720" alt="GUI screenshot">
 </p>
 
+[![CI](https://github.com/log-ultimatia/video2markdown/actions/workflows/ci.yml/badge.svg)](https://github.com/log-ultimatia/video2markdown/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+
 `Python` · `Windows-first GUI` · `faster-whisper` · `MIT`
 
 ---
