@@ -90,6 +90,14 @@ RESUME_OVERLAP = 2.0         # 续跑时往回多转几秒，避免正好切在�
 #  v4: 分块 300s -> 60s，且每块单独检测语言（修混合语言被幻觉吃掉）
 
 # Windows 上不想让子进程弹黑框
+# Windows 的英文版控制台默认是 cp1252，打印中文会 UnicodeEncodeError 直接崩溃。
+# 保留控制台原有编码，只把无法编码的字符替换掉 —— 中文版 Windows（GBK）不受影响。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except Exception:
+        pass
+
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 # ---------------------------------------------------------------------------

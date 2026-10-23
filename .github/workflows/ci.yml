@@ -9,8 +9,8 @@ on:
 jobs:
   # ---------------------------------------------------------------------------
   # 1. 语法与启动检查
-  #    不需要装任何第三方依赖，所以很快（每个 job 约 20 秒）
-  #    Windows 也跑一遍：项目里有 .ps1 / .bat 和 Windows 专属分支
+  #    不需要装第三方依赖，所以很快（每个 job 约 20 秒）
+  #    Windows 也跑：项目里有 .ps1 / .bat，且 console 编码和 Linux 不同
   # ---------------------------------------------------------------------------
   syntax:
     name: Syntax (${{ matrix.os }} / py${{ matrix.python }})
@@ -31,7 +31,7 @@ jobs:
         shell: bash
         run: |
           set -e
-          files="app.py pipeline.py check_env.py make_icon.py tools/diag_open.py"
+          files="app.py pipeline.py check_env.py make_icon.py tools/diag_open.py tools/check_links.py"
           for f in $files; do
             echo "::group::py_compile $f"
             python -m py_compile "$f"
@@ -39,6 +39,9 @@ jobs:
             echo "::endgroup::"
           done
 
+      # 这一条曾经在 Windows 上失败：英文版控制台的 cp1252 编码打印中文会
+      # UnicodeEncodeError，所以 pipeline.py / check_env.py 里都加了
+      # stdout.reconfigure(errors="replace") 兜底。这个 job 就是守着它不回归。
       - name: 命令行入口能正常启动
         run: |
           python pipeline.py --help
@@ -46,7 +49,7 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # 2. 文档相对链接检查
-  #    README 和 docs/ 里引用了截图和互相引用，路径写错很难发现
+  #    README 与 docs/ 互相引用较多还引用截图，断链靠肉眼很难发现
   # ---------------------------------------------------------------------------
   links:
     name: Docs links
@@ -54,38 +57,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 检查 README / docs 里的相对链接是否都存在
-        run: |
-          python - <<'PY'
-          import pathlib
-          import re
-          import sys
-
-          root = pathlib.Path(".")
-          bad = []
-
-          targets = [root / "README.md", *sorted((root / "docs").glob("*.md"))]
-          pattern = re.compile(r"\]\(([^)#]+?)\)")
-
-          for md in targets:
-              text = md.read_text(encoding="utf-8")
-              for m in pattern.finditer(text):
-                  link = m.group(1).strip()
-                  if link.startswith(("http://", "https://", "mailto:", "#")):
-                      continue
-                  # 去掉锚点
-                  path_part = link.split("#")[0]
-                  if not path_part:
-                      continue
-                  resolved = (md.parent / path_part).resolve()
-                  if not resolved.exists():
-                      bad.append(f"{md.relative_to(root)} -> {link}")
-
-          if bad:
-              print("断链：")
-              for b in bad:
-                  print("  -", b)
-              sys.exit(1)
-
-          print(f"检查了 {len(targets)} 个 Markdown 文件，没有断链 ✓")
-          PY
+      - name: 检查 Markdown 里的相对链接
+        run: python tools/check_links.py

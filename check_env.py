@@ -39,6 +39,15 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+# Windows 的英文版控制台默认是 cp1252，打印中文会 UnicodeEncodeError 直接崩溃。
+# 保留控制台原有编码，只把无法编码的字符替换掉 —— 中文版 Windows（GBK）不受影响。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except Exception:
+        pass
+
+
 # 项目根目录（本文件所在目录）
 LAB_DIR = Path(__file__).resolve().parent
 
