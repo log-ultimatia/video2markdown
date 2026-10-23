@@ -1,0 +1,20 @@
+# 统一换行符处理：仓库内用 LF，检出时按平台
+* text=auto
+
+# Windows 脚本必须是 CRLF，否则 cmd / powershell 会出问题
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制文件不要做任何换行转换
+*.png binary
+*.ico binary
+*.jpg binary
+*.wav binary
+*.mp4 binary
+*.webm binary
+
+# 文档统一 LF
+*.md text eol=lf
+*.py text eol=lf
+*.txt text eol=lf
