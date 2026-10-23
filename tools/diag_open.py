@@ -7,7 +7,7 @@ diag_open.py —— 诊断「打开文件 / 打开目录」为什么失败
 把那个日志发给开发者就能定位问题。
 
 用法（在 youtube2md_lab 目录下）：
-    .venv\\Scripts\\python.exe diag_open.py
+    .venv\\Scripts\\python.exe tools\\diag_open.py
 或者直接双击同目录下的「诊断打开方式.bat」。
 """
 
@@ -20,7 +20,8 @@ import sys
 import time
 from pathlib import Path
 
-LAB = Path(__file__).resolve().parent
+# 这个脚本在 tools/ 下，项目根是上一级
+LAB = Path(__file__).resolve().parent.parent
 LOG_PATH = LAB / "diag_open.log"
 NUL = subprocess.DEVNULL
 

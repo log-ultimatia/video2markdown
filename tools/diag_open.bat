@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul 2>&1
 setlocal
-cd /d "%~dp0"
+cd /d "%~dp0.."
 set PYTHONIOENCODING=utf-8
 set PYTHONUTF8=1
 echo ============================================================
@@ -18,7 +18,7 @@ if not exist ".venv\Scripts\python.exe" (
 echo.
 echo ------------------------------------------------------------
 echo  Done. Log file:
-echo    %~dp0diag_open.log
+echo    %~dp0..\diag_open.log
 echo  Please send the content of that file.
 echo ------------------------------------------------------------
 pause

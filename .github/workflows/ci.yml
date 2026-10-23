@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. 语法与启动检查
+  #    不需要装任何第三方依赖，所以很快（每个 job 约 20 秒）
+  #    Windows 也跑一遍：项目里有 .ps1 / .bat 和 Windows 专属分支
+  # ---------------------------------------------------------------------------
+  syntax:
+    name: Syntax (${{ matrix.os }} / py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: 编译所有 Python 文件
+        shell: bash
+        run: |
+          set -e
+          files="app.py pipeline.py check_env.py make_icon.py tools/diag_open.py"
+          for f in $files; do
+            echo "::group::py_compile $f"
+            python -m py_compile "$f"
+            echo "ok"
+            echo "::endgroup::"
+          done
+
+      - name: 命令行入口能正常启动
+        run: |
+          python pipeline.py --help
+          python check_env.py --help
+
+  # ---------------------------------------------------------------------------
+  # 2. 文档相对链接检查
+  #    README 和 docs/ 里引用了截图和互相引用，路径写错很难发现
+  # ---------------------------------------------------------------------------
+  links:
+    name: Docs links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 检查 README / docs 里的相对链接是否都存在
+        run: |
+          python - <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          root = pathlib.Path(".")
+          bad = []
+
+          targets = [root / "README.md", *sorted((root / "docs").glob("*.md"))]
+          pattern = re.compile(r"\]\(([^)#]+?)\)")
+
+          for md in targets:
+              text = md.read_text(encoding="utf-8")
+              for m in pattern.finditer(text):
+                  link = m.group(1).strip()
+                  if link.startswith(("http://", "https://", "mailto:", "#")):
+                      continue
+                  # 去掉锚点
+                  path_part = link.split("#")[0]
+                  if not path_part:
+                      continue
+                  resolved = (md.parent / path_part).resolve()
+                  if not resolved.exists():
+                      bad.append(f"{md.relative_to(root)} -> {link}")
+
+          if bad:
+              print("断链：")
+              for b in bad:
+                  print("  -", b)
+              sys.exit(1)
+
+          print(f"检查了 {len(targets)} 个 Markdown 文件，没有断链 ✓")
+          PY
