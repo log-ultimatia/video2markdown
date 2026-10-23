@@ -106,7 +106,7 @@ transcript_source: "local_whisper"
 # Python Object Oriented Programming in 10 minutes 🐍
 
 ## Video Details
-- Source: [...](...)
+- Source: ...
 - Channel: Bro Code
 ...
 

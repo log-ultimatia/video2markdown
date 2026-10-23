@@ -52,6 +52,26 @@ def find_markdown(root: pathlib.Path) -> list[pathlib.Path]:
     return sorted(out)
 
 
+def name_exists_exactly(parent: pathlib.Path, name: str) -> bool:
+    """
+    确认 name 真的作为一项存在于 parent 目录里（不做任何路径修正）。
+
+    为什么需要：Windows 会悄悄修正路径，Linux 不会，导致本地通过而 CI 失败。
+    已知两种情况：
+      · 结尾的点被去掉："docs/..." 在 Windows 上等于 "docs"
+      · 文件名大小写不敏感："README.MD" 能匹配 "README.md"
+    这两类在 Ubuntu 上都是断链。
+    注意：必须用【链接里原始写的文件名】来比，不能先 resolve ——
+    resolve() 在 Windows 上已经把结尾的点吃掉了，那就查不出来了。
+    """
+    try:
+        if not parent.is_dir():
+            return False
+        return name in {e.name for e in parent.iterdir()}
+    except OSError:
+        return False
+
+
 def main() -> int:
     root = pathlib.Path(__file__).resolve().parent.parent
     files = find_markdown(root)
@@ -85,7 +105,9 @@ def main() -> int:
 
             checked += 1
             resolved = (md.parent / path_part).resolve()
-            if not resolved.exists():
+            raw_name = path_part.replace("\\", "/").rstrip("/").split("/")[-1]
+            if (not resolved.exists()
+                    or not name_exists_exactly(resolved.parent, raw_name)):
                 broken.append(f"{md.relative_to(root).as_posix()} -> {target}")
 
     print(f"检查了 {len(files)} 个 Markdown 文件、{checked} 个相对链接")

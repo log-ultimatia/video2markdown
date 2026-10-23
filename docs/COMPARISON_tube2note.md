@@ -127,7 +127,7 @@ $ tube2note "https://www.youtube.com/watch?v=zYC7tKfKPtM" --proxy ... --lang en
 0/1 videos · 0 words
 │ 0 videos -> tube2note.md (1 skipped)
 ## Skipped
-- [Names, Assignment, and User-Defined Functions](...) — subtitle too short
+- `Names, Assignment, and User-Defined Functions` — subtitle too short
 ```
 
 注意它的提示是 **"subtitle too short"（字幕太短）**，但实际是**根本没有字幕**——
