@@ -29,6 +29,11 @@ opencc-python-reimplemented>=0.1.7
 # --- 数值计算 ---
 numpy>=1.26
 
+# --- Intel NPU（可选后端）---
+# OpenVINO GenAI 的 WhisperPipeline 支持 CPU / Intel GPU / Intel NPU。
+openvino>=2026.4,<2027
+openvino-genai>=2026.4,<2027
+
 # 说明：以下包是 faster-whisper 的传递依赖，不直接调用，列在这里是为了
 # 在依赖解析出问题时能快速定位版本：
 #   av, tokenizers, huggingface-hub, onnxruntime, tqdm, protobuf, flatbuffers

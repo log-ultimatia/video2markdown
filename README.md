@@ -63,6 +63,12 @@ python pipeline.py URL --proxy http://127.0.0.1:7890
 # Force a language instead of auto-detecting
 python pipeline.py URL --lang en
 
+# 选择推理设备：auto / cpu / cuda
+python pipeline.py URL --device cuda
+
+# Intel Ultra NPU（OpenVINO）
+python pipeline.py URL --device npu --model small
+
 # 登录/会员视频：传入 Netscape HTTP Cookie File
 python pipeline.py URL --cookies D:\path\cookies.txt
 ```
@@ -172,6 +178,9 @@ python pipeline.py URL --proxy http://127.0.0.1:7890
 
 # 强制语言，跳过自动检测
 python pipeline.py URL --lang zh
+
+# 选择推理设备（Intel Ultra NPU）
+python pipeline.py URL --device npu --model small
 
 # 忽略断点缓存，从头转写
 python pipeline.py URL --no-resume
@@ -284,6 +293,12 @@ $env:HF_ENDPOINT = "https://hf-mirror.com"
 **Q：转写很慢**
 `small` 在 CPU 上约 8 倍实时（1 小时视频约 8 分钟）。想更快用 `--model base`（约 20 倍实时）；想更准用 `--model medium`。
 装了 CUDA 运行库会自动用 GPU：`pip install nvidia-cublas-cu12 nvidia-cudnn-cu12`。
+GUI 和 CLI 都支持设备切换：`auto`、`cpu`、`cuda`、`npu`。Intel NPU 使用 OpenVINO Whisper int8 模型。
+OpenVINO 依赖可通过南京大学 PyPI 镜像安装：
+
+```powershell
+.venv\Scripts\python.exe -m pip install -i https://mirrors.nju.edu.cn/pypi/web/simple -r requirements.txt
+```
 
 **Q：界面上的「外部程序」「所在文件夹」按钮没反应**
 某些 Windows 环境（第三方 shell 扩展注入）会让 `explorer.exe` / `Code.exe` 以 `0xC0000142` 退出。可以用界面里的「复制全文」「复制路径」兜底，或运行 `tools/diag_open.bat` 生成诊断日志。

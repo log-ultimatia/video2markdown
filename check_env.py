@@ -59,6 +59,7 @@ PACKAGES = {
     "yt_dlp": "yt-dlp",
     "faster_whisper": "faster-whisper",
     "socks": "PySocks",
+    "openvino_genai": "openvino-genai",
 }
 
 MIN_PYTHON = (3, 9)
@@ -245,12 +246,42 @@ def check_packages(rep: Report) -> None:
             rep.ok("ctranslate2", f"{ctranslate2.__version__}  CPU: {sorted(cpu)}")
             try:
                 ctranslate2.get_supported_compute_types("cuda")
-                rep.ok("CUDA 可用", "转写会自动用 GPU")
+                cuda_runtime = True
+                if os.name == "nt":
+                    import ctypes
+                    cuda_runtime = any(
+                        _dll_loadable(name) for name in
+                        ("cublas64_12.dll", "cublasLt64_12.dll", "cublas64_11.dll"))
+                if cuda_runtime:
+                    rep.ok("CUDA 可用", "转写会自动用 GPU")
+                else:
+                    rep.warn("CUDA 编译支持已存在，但运行库缺失",
+                             "安装 nvidia-cublas-cu12 和 nvidia-cudnn-cu12 后才能使用 GPU")
             except Exception:
                 rep.warn("CUDA 不可用，将用 CPU 转写",
                          "base 模型在 CPU 上也够快，不影响流程跑通")
         except Exception as exc:
             rep.warn("无法探测算力", f"{type(exc).__name__}: {exc}")
+
+    if importlib.util.find_spec("openvino_genai") is not None:
+        try:
+            from openvino import Core
+            devices = Core().available_devices
+            if "NPU" in devices:
+                rep.ok("Intel NPU 可用", "OpenVINO 已发现 NPU 设备")
+            else:
+                rep.warn("未发现 Intel NPU", f"OpenVINO 设备：{', '.join(devices)}")
+        except Exception as exc:
+            rep.warn("无法探测 Intel NPU", f"{type(exc).__name__}: {exc}")
+
+
+def _dll_loadable(name: str) -> bool:
+    try:
+        import ctypes
+        ctypes.WinDLL(name)
+        return True
+    except OSError:
+        return False
 
 
 def _dist_version(dist: str) -> str:

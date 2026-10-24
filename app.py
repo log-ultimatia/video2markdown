@@ -76,6 +76,13 @@ MODEL_CHOICES = (
     ("medium", "最准，慢约 2 倍（1.5GB）"),
 )
 
+DEVICE_CHOICES = (
+    ("自动（推荐）", "auto"),
+    ("CPU（int8）", "cpu"),
+    ("NVIDIA CUDA GPU", "cuda"),
+    ("Intel Ultra NPU（OpenVINO）", "npu"),
+)
+
 # ---------------------------------------------------------------------------
 # 配色
 # ---------------------------------------------------------------------------
@@ -465,6 +472,20 @@ class App:
                        activebackground=C_CARD, selectcolor=C_CARD).pack(
             side="left", padx=(14, 0))
 
+        drow = tk.Frame(card, bg=C_CARD)
+        drow.pack(fill="x", padx=12, pady=(1, 3))
+        tk.Label(drow, text="设备：", bg=C_CARD, fg=C_MUTED,
+                 font=UI_FONT).pack(side="left")
+        self.device_var = tk.StringVar(value="自动（推荐）")
+        self.device_box = ttk.Combobox(
+            drow, textvariable=self.device_var, state="readonly", width=28,
+            values=[label for label, _ in DEVICE_CHOICES], font=UI_FONT)
+        self.device_box.pack(side="left")
+        self.device_tip = tk.Label(drow, text="自动检测 CUDA，不可用时使用 CPU",
+                                   bg=C_CARD, fg=C_MUTED, font=UI_FONT_SM)
+        self.device_tip.pack(side="left", padx=(8, 0))
+        self.device_box.bind("<<ComboboxSelected>>", self._on_device_change)
+
         self.dnd_hint = tk.Label(
             card, text="提示：直接粘贴 YouTube 链接即可；中英混排的视频请保持「自动检测/混合」",
             bg=C_CARD, fg=C_MUTED, font=UI_FONT_SM)
@@ -635,6 +656,22 @@ class App:
             if name == self.model_var.get():
                 self.model_tip.configure(text=tip)
                 return
+
+    def _on_device_change(self, _e=None) -> None:
+        mode = self._selected_device()
+        if mode == "npu":
+            self.device_tip.configure(
+                text="OpenVINO Whisper NPU",
+                fg=C_MUTED)
+        elif mode == "cuda":
+            self.device_tip.configure(
+                text="需要 NVIDIA CUDA/cuBLAS/cuDNN 运行库",
+                fg=C_MUTED)
+        elif mode == "cpu":
+            self.device_tip.configure(text="强制使用 CPU int8", fg=C_MUTED)
+        else:
+            self.device_tip.configure(
+                text="自动检测 CUDA，不可用时使用 CPU", fg=C_MUTED)
 
     def _browse(self) -> None:
         path = filedialog.askopenfilename(
@@ -808,12 +845,20 @@ class App:
                 return code
         return None
 
+    def _selected_device(self) -> str:
+        cur = self.device_var.get()
+        for label, code in DEVICE_CHOICES:
+            if label == cur:
+                return code
+        return "auto"
+
     def _build_cmd(self, source: str) -> list:
         cmd = [str(_python_exe()), "-u", str(PIPELINE), source,
                "--model", self.model_var.get()]
         lang = self._selected_lang()
         if lang:
             cmd += ["--lang", lang]
+        cmd += ["--device", self._selected_device()]
         if not self.resume_var.get():
             cmd.append("--no-resume")
         if self.no_proxy_var.get():
@@ -841,6 +886,7 @@ class App:
         self.log_line("", "")
         self.log_line(f"=== 开始生成 ===", "step")
         self.log_line(f"  模型 {self.model_var.get()}　"
+                      f"设备 {self._selected_device()}　"
                       f"{'直连' if self.no_proxy_var.get() else '代理 ' + (self.proxy_var.get() or DEFAULT_PROXY)}",
                       "dim")
         self._launch(cmd, "正在启动…", on_done_status="完成")

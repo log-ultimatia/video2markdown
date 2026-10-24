@@ -31,6 +31,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -80,6 +81,8 @@ HARDCODED_PROXY = ""
 
 SAMPLE_RATE = 16000          # Whisper 要求 16 kHz
 WHISPER_MODEL = "base"       # tiny / base / small / medium / large-v3
+DEVICE_MODES = ("auto", "cpu", "cuda", "npu")
+NPU_MODEL_REPO = "OpenVINO/whisper-{model}-int8-ov"
 PARAGRAPH_CHARS = 180        # 每段大约多少字（用来把字幕切成可读段落）
 PARAGRAPH_GAP = 1.5          # 相邻字幕间隔超过这个秒数就另起一段
 CHUNK_SEC = 60               # 分块秒数。
@@ -667,6 +670,97 @@ def _is_cuda_runtime_error(exc: Exception) -> bool:
     return any(k in text for k in keys)
 
 
+def _device_candidates(mode: str) -> list[tuple[str, str]]:
+    """Resolve the requested execution mode into CTranslate2 candidates."""
+    mode = (mode or "auto").lower()
+    if mode not in DEVICE_MODES:
+        raise PipelineError(
+            f"未知设备模式：{mode}。可选值：auto、cpu、cuda、npu。")
+    if mode == "npu":
+        return [("npu", "int8")]
+    if mode == "cpu":
+        return [("cpu", "int8")]
+    if mode == "cuda":
+        if not _cuda_libs_present():
+            raise PipelineError(
+                "已强制选择 CUDA，但当前环境缺少 CUDA 运行库。\n"
+                "   请安装：pip install nvidia-cublas-cu12 nvidia-cudnn-cu12\n"
+                "   或改选“自动”，让程序使用 CPU。")
+        return [("cuda", "float16")]
+    candidates = [("cuda", "float16"), ("cpu", "int8")]
+    if not _cuda_libs_present():
+        candidates = [("cpu", "int8")]
+        print("  未检测到 CUDA 运行库（cublas64_12.dll），自动使用 CPU")
+    return candidates
+
+
+_NPU_PIPELINE_CACHE: dict = {}
+
+
+def _npu_model_path(model_size: str) -> Path:
+    """Download an OpenVINO Whisper model when it is not already cached."""
+    if model_size not in {"tiny", "base", "small", "medium", "large-v3"}:
+        raise PipelineError(f"NPU 不支持未知模型：{model_size}")
+    repo = NPU_MODEL_REPO.format(model=model_size)
+    target = MODEL_DIR / "openvino" / f"whisper-{model_size}-int8-ov"
+    required = (
+        "openvino_encoder_model.xml", "openvino_encoder_model.bin",
+        "openvino_decoder_model.xml", "openvino_decoder_model.bin",
+        "openvino_tokenizer.xml", "openvino_tokenizer.bin",
+        "openvino_detokenizer.xml", "openvino_detokenizer.bin",
+        "generation_config.json")
+    if target.is_dir() and all((target / name).exists() for name in required):
+        return target
+
+    endpoint = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com").rstrip("/")
+    api_url = f"{endpoint}/api/models/{repo}/tree/main?recursive=true"
+    try:
+        request = urllib.request.Request(
+            api_url, headers={"User-Agent": "video2markdown/1.0"})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            files = json.load(response)
+    except Exception as exc:
+        raise PipelineError(
+            f"无法获取 NPU 模型清单：{repo}\n"
+            f"   当前镜像：{endpoint}\n"
+            f"   原始错误：{type(exc).__name__}: {exc}") from exc
+
+    try:
+        from huggingface_hub import snapshot_download
+        target.parent.mkdir(parents=True, exist_ok=True)
+        snapshot_download(repo, local_dir=str(target), endpoint=endpoint,
+                           max_workers=4)
+    except Exception as exc:
+        raise PipelineError(
+            f"NPU 模型下载失败：{repo}\n"
+            f"   原始错误：{type(exc).__name__}: {exc}") from exc
+    if not all((target / name).exists() for name in required):
+        raise PipelineError(f"NPU 模型下载完成但文件不完整：{target}")
+    return target
+
+
+def _get_npu_pipeline(model_size: str):
+    """Create and cache an OpenVINO Whisper pipeline on Intel NPU."""
+    if model_size not in _NPU_PIPELINE_CACHE:
+        try:
+            import openvino_genai as ov_genai
+        except ImportError as exc:
+            raise PipelineError(
+                "没有安装 OpenVINO NPU 后端。\n"
+                "   请使用南京大学 PyPI 镜像安装：\n"
+                "   pip install -i https://mirrors.nju.edu.cn/pypi/web/simple "
+                "openvino openvino-genai") from exc
+        model_path = _npu_model_path(model_size)
+        try:
+            _NPU_PIPELINE_CACHE[model_size] = ov_genai.WhisperPipeline(
+                str(model_path), "NPU", word_timestamps=True)
+        except Exception as exc:
+            raise PipelineError(
+                f"Intel NPU 初始化失败：{type(exc).__name__}: {exc}\n"
+                "   请确认 Intel NPU 驱动和 OpenVINO NPU 插件已安装。") from exc
+    return _NPU_PIPELINE_CACHE[model_size]
+
+
 # 模型实例缓存。
 # 分块转写（CHUNK_SEC=60）后，一块一次 _run_once，如果每次都新建 WhisperModel，
 # 24 分钟视频就要重复加载 24 次模型（small 每次约 2.5 秒，白等一分钟）。
@@ -681,6 +775,64 @@ def _get_model(model_cls, model_size: str, device: str, compute_type: str):
             model_size, device=device, compute_type=compute_type,
             download_root=str(MODEL_DIR))
     return _MODEL_CACHE[key]
+
+
+def _run_once_npu(model_size: str, audio, lang: str | None = None,
+                  prompt: str | None = None, base_offset: float = 0.0,
+                  chunk_idx: int = 0, chunk_total: int = 1,
+                  on_segment=None, skip_before: float = -1.0):
+    """Transcribe one chunk through OpenVINO GenAI on Intel NPU."""
+    import numpy as np
+    from types import SimpleNamespace
+
+    # OpenVINO WhisperPipeline has no faster-whisper VAD filter. Avoid feeding
+    # near-silent chunks to the decoder, which otherwise tends to hallucinate a
+    # short word on empty audio.
+    if float(np.sqrt(np.mean(np.square(audio)))) < 0.005:
+        return [], SimpleNamespace(
+            duration=len(audio) / SAMPLE_RATE,
+            language=lang or "?",
+            language_probability=0.0,
+        ), "npu/int8", (lang or "?")
+
+    pipeline = _get_npu_pipeline(model_size)
+    kwargs = {
+        "return_timestamps": True,
+        "task": "transcribe",
+        "no_repeat_ngram_size": 3,
+    }
+    if lang:
+        kwargs["language"] = lang
+        kwargs["initial_prompt"] = prompt or prompt_for(lang)
+    if prompt:
+        kwargs["initial_prompt"] = prompt
+    try:
+        result = pipeline.generate(np.asarray(audio, dtype=np.float32).tolist(),
+                                   **kwargs)
+    except Exception as exc:
+        raise PipelineError(
+            f"Intel NPU 转写失败：{type(exc).__name__}: {exc}") from exc
+
+    detected = (getattr(result, "language", None) or lang or "?").lower()
+    probability = 0.0
+    segments = []
+    for chunk in result.chunks:
+        text = getattr(chunk, "text", "") or ""
+        if text and detected.startswith("zh"):
+            text = to_simplified(text)
+        start = round(float(chunk.start_ts) + base_offset, 3)
+        end = round(float(chunk.end_ts) + base_offset, 3)
+        item = {"start": start, "end": end, "text": text}
+        if skip_before >= 0 and start < skip_before - 0.05:
+            continue
+        segments.append(item)
+        if on_segment is not None:
+            on_segment(item)
+    return segments, SimpleNamespace(
+        duration=len(audio) / SAMPLE_RATE,
+        language=detected,
+        language_probability=probability,
+    ), "npu/int8", detected
 
 
 def _run_once(model_cls, model_size: str, device: str, compute_type: str,
@@ -699,6 +851,13 @@ def _run_once(model_cls, model_size: str, device: str, compute_type: str,
 
     返回 (segments, info, 用了哪个设备, 最终语言)。
     """
+    if device == "npu":
+        return _run_once_npu(
+            model_size, audio, lang=lang, prompt=prompt,
+            base_offset=base_offset, chunk_idx=chunk_idx,
+            chunk_total=chunk_total, on_segment=on_segment,
+            skip_before=skip_before)
+
     model = _get_model(model_cls, model_size, device, compute_type)
 
     # 每块单独检测语言。这一步是混合语言场景的关键：
@@ -776,13 +935,14 @@ def _ckpt_path(wav: Path) -> Path:
     return wav.with_suffix(".segments.json")
 
 
-def _ckpt_signature(wav: Path, model_size: str, lang: str | None) -> str:
+def _ckpt_signature(wav: Path, model_size: str, lang: str | None,
+                    device_mode: str = "auto") -> str:
     """
     检查点的"指纹"。音频文件、模型、语言、分块大小任何一个变了，
     旧结果都不能复用（否则会把不同模型/不同参数的结果混在一起）。
     """
     st = wav.stat()
-    return (f"v{CKPT_VERSION}|{model_size}|{lang or 'auto+multi'}"
+    return (f"v{CKPT_VERSION}|{model_size}|{lang or 'auto+multi'}|{device_mode}"
             f"|{CHUNK_SEC}|{st.st_size}|{int(st.st_mtime)}")
 
 
@@ -858,7 +1018,8 @@ def _chunk_ranges(audio, rate: int, chunk_sec: float) -> list:
 
 
 def transcribe(wav: Path, model_size: str = WHISPER_MODEL,
-               lang: str | None = None, resume: bool = True):
+               lang: str | None = None, resume: bool = True,
+               device_mode: str = "auto"):
     """
     用 faster-whisper 做语音识别，返回 (段落列表, 识别信息, 耗时秒)。
 
@@ -878,16 +1039,19 @@ def transcribe(wav: Path, model_size: str = WHISPER_MODEL,
       initial_prompt    按语言给"书面语示例"，中文决定简体与标点
     """
     banner("第 4 层 / 语音转文本")
-    print(f"  模型：faster-whisper {model_size}（缓存在 {MODEL_DIR}）")
+    engine = "OpenVINO Whisper" if device_mode == "npu" else "faster-whisper"
+    print(f"  模型：{engine} {model_size}（缓存在 {MODEL_DIR}）")
 
-    try:
-        from faster_whisper import WhisperModel
-    except ImportError as exc:
-        raise PipelineError(
-            "没有装 faster-whisper。\n"
-            "   修复：pip install faster-whisper\n"
-            f"   （原始错误：{exc}）"
-        ) from exc
+    WhisperModel = None
+    if device_mode != "npu":
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError as exc:
+            raise PipelineError(
+                "没有装 faster-whisper。\n"
+                "   修复：pip install faster-whisper\n"
+                f"   （原始错误：{exc}）"
+            ) from exc
 
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -896,7 +1060,7 @@ def transcribe(wav: Path, model_size: str = WHISPER_MODEL,
     total_sec = len(audio) / rate
     print(f"  音频 {_fmt_duration(total_sec)}")
 
-    sig = _ckpt_signature(wav, model_size, lang)
+    sig = _ckpt_signature(wav, model_size, lang, device_mode)
     saved = _load_ckpt(wav, sig) if resume else []
     if not resume and _ckpt_path(wav).exists():
         print("  已指定 --no-resume，忽略旧检查点")
@@ -929,10 +1093,8 @@ def transcribe(wav: Path, model_size: str = WHISPER_MODEL,
     else:
         print(f"  语言：锁定 {forced_lang}（提示词已按该语言匹配）")
 
-    candidates = [("cuda", "float16"), ("cpu", "int8")]
-    if not _cuda_libs_present():
-        candidates = [("cpu", "int8")]
-        print("  未检测到 CUDA 运行库（cublas64_12.dll），直接使用 CPU")
+    candidates = _device_candidates(device_mode)
+    print(f"  设备模式：{device_mode}（候选：{', '.join(f'{d}/{t}' for d, t in candidates)}）")
 
     chosen = None
     last_info = None
@@ -984,7 +1146,8 @@ def transcribe(wav: Path, model_size: str = WHISPER_MODEL,
                 break
             except Exception as exc:
                 last_exc = exc
-                if device != "cuda" or not _is_cuda_runtime_error(exc):
+                if (device != "cuda" or not _is_cuda_runtime_error(exc)
+                        or device_mode != "auto"):
                     raise PipelineError(_explain_model_error(exc)) from exc
                 print(f"  [警告] CUDA 推理失败：{str(exc)[:88]}")
                 print("         缺的是 CUDA 运行库（cuBLAS/cuDNN），不是显卡驱动。")
@@ -1180,7 +1343,7 @@ def _fmt_clock(seconds: float) -> str:
 def run(url: str, proxy_arg: str | None, no_proxy: bool,
         model: str, force: bool, out: Path | None,
         lang: str | None = None, resume: bool = True,
-        cookies: Path | None = None) -> int:
+        cookies: Path | None = None, device_mode: str = "auto") -> int:
     rep = Report()
 
     # 先查硬依赖：ffmpeg 缺失时没必要先花时间下载
@@ -1213,7 +1376,8 @@ def run(url: str, proxy_arg: str | None, no_proxy: bool,
         rep.add("提取音频", time.time() - t0, wav.name)
 
         # 4. 转写
-        segments, tr_info, tr_sec = transcribe(wav, model, lang, resume)
+        segments, tr_info, tr_sec = transcribe(
+            wav, model, lang, resume, device_mode=device_mode)
         rep.add("语音转写", tr_sec, f"{len(segments)} 条字幕")
         if not segments:
             raise PipelineError(
@@ -1257,6 +1421,9 @@ def main() -> int:
     parser.add_argument(
         "--cookies", type=Path,
         help="Netscape HTTP Cookie File 路径（用于需要登录的视频）")
+    parser.add_argument(
+        "--device", choices=DEVICE_MODES, default="auto",
+        help="推理设备：auto（自动）、cpu、cuda、npu（OpenVINO Intel NPU）")
     parser.add_argument("--lang", default=None,
                         help="强制语言（如 zh / en / ja）；不填则自动检测")
     parser.add_argument("--no-resume", action="store_true",
@@ -1281,7 +1448,8 @@ def main() -> int:
 
     return run(args.url, args.proxy, args.no_proxy,
                args.model, args.force, args.out, lang=args.lang,
-               resume=not args.no_resume, cookies=args.cookies)
+               resume=not args.no_resume, cookies=args.cookies,
+               device_mode=args.device)
 
 
 if __name__ == "__main__":
