@@ -216,7 +216,7 @@ Windows 用户还可以用 `create_shortcut.ps1` 生成桌面快捷方式（带�
 | 层 | 做什么 | 关键实现 |
 |---|---|---|
 | 1 | 解析代理 | CLI > 硬编码 > 环境变量 > 默认 7890，带端口连通性检测 |
-| 2 | 下载音频 | `yt-dlp`，`format=bestaudio`（只取音轨：110 分钟视频 50MB 而不是 220MB） |
+| 2 | 下载音频 | `yt-dlp` 优先只取独立音轨；没有独立音轨时选最低画质的合并流 |
 | 3 | 提取音频 | `ffmpeg -vn -ac 1 -ar 16000 -c:a pcm_s16le` |
 | 4 | 语音转文字 | `faster-whisper` + CTranslate2，CPU int8 / GPU float16 |
 | 5 | 生成 Markdown | 相邻字幕按语义合并成 ~180 字段落 |

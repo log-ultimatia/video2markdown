@@ -22,7 +22,7 @@
 | 层 | 命令 / 实现 | 关键参数与理由 |
 |---|---|---|
 | 1 代理 | 纯 socket 探测 | 优先级：CLI > 硬编码 > 环境变量 > 默认 7890；探测失败自动退化直连并警告 |
-| 2 下载 | `yt-dlp` | `format=bestaudio/best`（只取音轨）；`noprogress`（用自己的进度回调）；`proxy` 显式传入 |
+| 2 下载 | `yt-dlp` | 优先 `bestaudio`；无独立音轨时选最低画质合并流，最后回退 `best`；`noprogress`（用自己的进度回调）；`proxy` 显式传入 |
 | 3 提取 | `ffmpeg` | `-vn -ac 1 -ar 16000 -c:a pcm_s16le` |
 | 4 转写 | `faster-whisper` | 见下面第 3~5 节 |
 | 5 输出 | 纯 Python | 相邻字幕按语义合并成约 180 字段落 |

@@ -373,10 +373,8 @@ def download_audio(url: str, proxy: str | None, force: bool = False,
     """
     用 yt-dlp 下载【只有音频】的流。
 
-    为什么是 bestaudio 而不是 best：
-      · 转写只需要声音，视频轨道是纯浪费（一个 110 分钟的视频：视频 220MB vs 音频 50MB）
-      · 音频流是单一容器，不需要 ffmpeg 做音视频合并，少一个失败点
-      · 下载快 3~5 倍
+    优先下载独立音轨；只有没有独立音轨时，才退回最低画质的音视频流。
+    若站点没有可用的低画质合并流，才使用默认最佳格式。
 
     返回 (音频文件路径, yt-dlp 的元信息 dict)。
     """
@@ -410,7 +408,7 @@ def download_audio(url: str, proxy: str | None, force: bool = False,
     cookie_file = _cookie_file(cookies)
 
     opts = {
-        "format": "bestaudio/best",     # 没有纯音频流时才退回 best
+        "format": "bestaudio/worst[acodec!=none][vcodec!=none]/best",
         "outtmpl": outtmpl,
         "noplaylist": True,             # 只下这一集，别把整个播放列表拖下来
         "quiet": True,
