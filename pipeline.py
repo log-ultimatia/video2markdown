@@ -58,11 +58,16 @@ MODEL_DIR = Path(_MODEL_DIR_ENV) if _MODEL_DIR_ENV else (LAB_DIR / "models")
 # 所以这里把 HF_HOME 也默认指到项目内，让整个 lab 真正自包含。
 # 用 setdefault：你显式设了 HF_HOME 或 Y2M 之外的路径，就以你的为准。
 os.environ.setdefault("HF_HOME", str(MODEL_DIR / ".hf"))
+# CLI and GUI should use the same mirror default. Explicit user configuration wins.
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 # 同理：Windows 没开"开发者模式"时 huggingface_hub 建不了符号链接，
 # 每次都会打一段二十行的警告。功能不受影响（退化成一字一份副本），
 # 但会把 CLI 输出淹没，所以关掉这条提示。
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+# Some mirrors do not support Hugging Face's Xet CAS endpoints; force the
+# regular HTTP blob path unless the user explicitly chooses otherwise.
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 # 代理：默认本地 7890（Clash / v2ray 常见端口）
 DEFAULT_PROXY = "http://127.0.0.1:7890"
@@ -273,10 +278,95 @@ def _probe_socket(host: str, port: int, timeout: float = 3.0):
         return False, f"{type(exc).__name__}: {exc}"
 
 
+def _numbered_path(path: Path) -> Path:
+    """Return *path*, or ``name (1)``, ``name (2)`` when it already exists."""
+    if not path.exists():
+        return path
+    stem, suffix = path.stem, path.suffix
+    index = 1
+    while True:
+        candidate = path.with_name(f"{stem} ({index}){suffix}")
+        if not candidate.exists():
+            return candidate
+        index += 1
+
+
+def _cookie_file(path: Path | None) -> str | None:
+    """Validate and normalize a Netscape cookie file for yt-dlp."""
+    if path is None:
+        return None
+    path = Path(path).expanduser()
+    if not path.is_file():
+        raise PipelineError(f"Cookie 文件不存在：{path}")
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise PipelineError(f"无法读取 Cookie 文件：{path}\n   {exc}") from exc
+    rows = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Netscape exports use #HttpOnly_ as a real domain prefix, not a comment.
+        if stripped.startswith("#") and not stripped.startswith("#HttpOnly_"):
+            continue
+        rows.append(stripped)
+    if not rows or not any(len(row.split("\t")) >= 7 for row in rows):
+        raise PipelineError(
+            f"Cookie 文件不是 Netscape 格式：{path}\n"
+            "   请导出为 Netscape HTTP Cookie File（每行用 Tab 分隔 7 列）。"
+        )
+    return str(path)
+
+
+def _source_marker(path: Path) -> Path:
+    return path.with_name(path.name + ".source.json")
+
+
+def _source_signature(path: Path) -> dict:
+    st = path.stat()
+    return {
+        "path": str(path.resolve()),
+        "size": st.st_size,
+        "mtime_ns": st.st_mtime_ns,
+    }
+
+
+def _same_source(target: Path, source: Path) -> bool:
+    try:
+        marker = _source_marker(target)
+        if not marker.exists():
+            return False
+        return json.loads(marker.read_text(encoding="utf-8")) == _source_signature(source)
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _target_for_source(base: Path, source: Path, force: bool = False) -> Path:
+    """Reuse a target only for the same source; otherwise add ``(n)``."""
+    if force:
+        return base
+    if not base.exists():
+        return base
+    if _same_source(base, source):
+        return base
+    return _numbered_path(base)
+
+
+def _save_source_marker(target: Path, source: Path) -> None:
+    try:
+        _source_marker(target).write_text(
+            json.dumps(_source_signature(source), ensure_ascii=False),
+            encoding="utf-8")
+    except OSError as exc:
+        print(f"  [警告] 来源标记保存失败：{exc}")
+
+
 # ---------------------------------------------------------------------------
 # 2. 下载层
 # ---------------------------------------------------------------------------
-def download_audio(url: str, proxy: str | None, force: bool = False) -> tuple[Path, dict]:
+def download_audio(url: str, proxy: str | None, force: bool = False,
+                   cookies: Path | None = None) -> tuple[Path, dict]:
     """
     用 yt-dlp 下载【只有音频】的流。
 
@@ -311,9 +401,10 @@ def download_audio(url: str, proxy: str | None, force: bool = False) -> tuple[Pa
 
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-    # outtmpl 里的 %(title).120s 是 yt-dlp 的模板语法：标题最多取 120 字符。
-    # Windows 路径总长有限制，标题过长的视频不截断会直接写入失败。
-    outtmpl = str(DOWNLOAD_DIR / "%(title).120s.%(ext)s")
+    # 标题最多取 120 字符；同时加入视频 ID，避免不同视频同标题时复用错文件。
+    outtmpl = str(DOWNLOAD_DIR / "%(title).120s [%(id)s].%(ext)s")
+
+    cookie_file = _cookie_file(cookies)
 
     opts = {
         "format": "bestaudio/best",     # 没有纯音频流时才退回 best
@@ -331,6 +422,8 @@ def download_audio(url: str, proxy: str | None, force: bool = False) -> tuple[Pa
         "overwrites": bool(force),
         "progress_hooks": [_progress_printer()],
     }
+    if cookie_file:
+        opts["cookiefile"] = cookie_file
 
     def run(extra_opts: dict):
         with yt_dlp.YoutubeDL({**opts, **extra_opts}) as ydl:
@@ -362,7 +455,7 @@ def download_audio(url: str, proxy: str | None, force: bool = False) -> tuple[Pa
         if "private" in msg.lower() or "sign in" in msg.lower():
             raise PipelineError(
                 "下载失败：这个视频需要登录或已设为私享/会员可见。\n"
-                "   可以先用浏览器登录后导出 cookies，再用 --cookies-from-browser 或在 yt-dlp 里传 cookies。\n"
+                "   请导出 Netscape HTTP Cookie File，然后使用 --cookies <文件路径>。\n"
                 f"   yt-dlp 原始信息：{msg[:300]}"
             ) from exc
         raise PipelineError(f"下载失败（yt-dlp）：{msg[:400]}") from exc
@@ -448,7 +541,8 @@ def extract_audio(source: Path, force: bool = False) -> Path:
     ffmpeg = require_ffmpeg()
 
     AUDIO_DIR.mkdir(parents=True, exist_ok=True)
-    target = AUDIO_DIR / f"{source.stem}.wav"
+    base = AUDIO_DIR / f"{source.stem}.wav"
+    target = _target_for_source(base, source, force)
 
     if target.exists() and target.stat().st_size > 0 and not force:
         print(f"  [跳过] 已存在：{target.name}"
@@ -484,6 +578,8 @@ def extract_audio(source: Path, force: bool = False) -> Path:
 
     if not target.exists() or target.stat().st_size == 0:
         raise PipelineError(f"ffmpeg 报告成功但没生成文件：{target}")
+
+    _save_source_marker(target, source)
 
     elapsed = time.time() - started
     print(f"  [OK] {target.name}  "
@@ -1018,8 +1114,9 @@ def write_markdown(url: str, info: dict, segments, tr_info,
         lines.append(text)
         lines.append("")
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    _save_source_marker(out_path, wav)
 
     size_kb = out_path.stat().st_size / 1024
     print(f"  [OK] {out_path}")
@@ -1082,7 +1179,8 @@ def _fmt_clock(seconds: float) -> str:
 # ---------------------------------------------------------------------------
 def run(url: str, proxy_arg: str | None, no_proxy: bool,
         model: str, force: bool, out: Path | None,
-        lang: str | None = None, resume: bool = True) -> int:
+        lang: str | None = None, resume: bool = True,
+        cookies: Path | None = None) -> int:
     rep = Report()
 
     # 先查硬依赖：ffmpeg 缺失时没必要先花时间下载
@@ -1096,12 +1194,17 @@ def run(url: str, proxy_arg: str | None, no_proxy: bool,
         # 1. 代理
         t0 = time.time()
         proxy = resolve_proxy(proxy_arg, no_proxy)
+        if proxy:
+            # yt-dlp receives the proxy explicitly; Hugging Face/model downloads
+            # use the standard proxy environment variables.
+            os.environ["HTTP_PROXY"] = proxy
+            os.environ["HTTPS_PROXY"] = proxy
         rep.add("代理配置", time.time() - t0,
                 "直连" if not proxy else proxy)
 
         # 2. 下载
         t0 = time.time()
-        src, info = download_audio(url, proxy, force)
+        src, info = download_audio(url, proxy, force, cookies=cookies)
         rep.add("下载音频", time.time() - t0, src.name)
 
         # 3. 提取
@@ -1120,7 +1223,8 @@ def run(url: str, proxy_arg: str | None, no_proxy: bool,
 
         # 5. 输出
         t0 = time.time()
-        target = out or (OUTPUT_DIR / f"{wav.stem}.md")
+        base = out or (OUTPUT_DIR / f"{wav.stem}.md")
+        target = _target_for_source(base, wav, force)
         md = write_markdown(url, info, segments, tr_info, wav, target,
                         model_size=model)
         rep.add("生成 Markdown", time.time() - t0, md.name)
@@ -1150,6 +1254,9 @@ def main() -> int:
     parser.add_argument("url", help="YouTube 视频链接")
     parser.add_argument("--proxy", help=f"代理地址（默认读环境变量，再退回 {DEFAULT_PROXY}）")
     parser.add_argument("--no-proxy", action="store_true", help="强制直连")
+    parser.add_argument(
+        "--cookies", type=Path,
+        help="Netscape HTTP Cookie File 路径（用于需要登录的视频）")
     parser.add_argument("--lang", default=None,
                         help="强制语言（如 zh / en / ja）；不填则自动检测")
     parser.add_argument("--no-resume", action="store_true",
@@ -1173,7 +1280,8 @@ def main() -> int:
     print("=" * 60)
 
     return run(args.url, args.proxy, args.no_proxy,
-                   args.model, args.force, args.out, lang=args.lang, resume=not args.no_resume)
+               args.model, args.force, args.out, lang=args.lang,
+               resume=not args.no_resume, cookies=args.cookies)
 
 
 if __name__ == "__main__":

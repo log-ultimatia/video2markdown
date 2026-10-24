@@ -58,7 +58,7 @@ SUBDIRS = ("downloads", "audio", "output")
 PACKAGES = {
     "yt_dlp": "yt-dlp",
     "faster_whisper": "faster-whisper",
-    "ffmpeg": "ffmpeg-python",
+    "socks": "PySocks",
 }
 
 MIN_PYTHON = (3, 9)
@@ -196,16 +196,16 @@ def check_proxy(rep: Report, port: int) -> bool:
         with socket.create_connection(("127.0.0.1", port), timeout=3):
             pass
     except socket.timeout:
-        rep.fail(f"连接 127.0.0.1:{port} 超时",
-                 hint="端口没响应。确认代理软件已启动、端口号没写错。")
+        rep.warn(f"连接 127.0.0.1:{port} 超时",
+                 hint="没有本地代理时可使用 pipeline.py --no-proxy；需要访问 YouTube 时再配置代理。")
         return False
     except ConnectionRefusedError:
-        rep.fail(f"127.0.0.1:{port} 拒绝连接",
-                 hint="没有程序监听这个端口：代理软件没开，或端口不是 " + str(port) +
-                      "。\n换个端口试试：python check_env.py --proxy-port 1080")
+        rep.warn(f"127.0.0.1:{port} 拒绝连接",
+                 hint="没有本地代理时可使用 pipeline.py --no-proxy；需要访问 YouTube 时再配置代理。")
         return False
     except OSError as exc:
-        rep.fail(f"连接 127.0.0.1:{port} 失败", f"{type(exc).__name__}: {exc}")
+        rep.warn(f"连接 127.0.0.1:{port} 失败", f"{type(exc).__name__}: {exc}",
+                 hint="代理是可选项；需要访问 YouTube 时请配置可用代理。")
         return False
 
     rep.ok(f"127.0.0.1:{port} 可以连上", "端口在监听")
@@ -218,6 +218,7 @@ def check_proxy(rep: Report, port: int) -> bool:
 def check_packages(rep: Report) -> None:
     print("\n[4/6] 核心依赖包")
     missing = []
+    faster_whisper_found = False
 
     for module, dist in PACKAGES.items():
         try:
@@ -225,6 +226,8 @@ def check_packages(rep: Report) -> None:
         except (ImportError, ValueError):
             found = False
         if found:
+            if module == "faster_whisper":
+                faster_whisper_found = True
             version = _dist_version(dist)
             rep.ok(f"{dist}", version)
         else:
@@ -235,7 +238,7 @@ def check_packages(rep: Report) -> None:
         rep.info("安装命令：pip install " + " ".join(missing))
 
     # faster-whisper 的实际算力：CPU / CUDA
-    if "faster_whisper" not in missing:
+    if faster_whisper_found:
         try:
             import ctranslate2
             cpu = ctranslate2.get_supported_compute_types("cpu")

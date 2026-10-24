@@ -62,6 +62,9 @@ python pipeline.py URL --proxy http://127.0.0.1:7890
 
 # Force a language instead of auto-detecting
 python pipeline.py URL --lang en
+
+# 登录/会员视频：传入 Netscape HTTP Cookie File
+python pipeline.py URL --cookies D:\path\cookies.txt
 ```
 
 Or launch the GUI:
@@ -172,6 +175,9 @@ python pipeline.py URL --lang zh
 
 # 忽略断点缓存，从头转写
 python pipeline.py URL --no-resume
+
+# 登录/会员视频：传入导出的 Netscape HTTP Cookie File（不要使用浏览器自动读取）
+python pipeline.py URL --cookies D:\path\cookies.txt
 ```
 
 图形界面：

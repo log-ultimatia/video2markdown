@@ -124,6 +124,7 @@ class App:
         self.proc: subprocess.Popen | None = None
         self.worker: threading.Thread | None = None
         self.running = False
+        self.stop_requested = False
         self.last_md: Path | None = None
 
         # 关键：接管 tkinter 的异常回调。
@@ -421,6 +422,17 @@ class App:
                        activebackground=C_CARD, selectcolor=C_CARD).pack(
             side="left", padx=(10, 0))
 
+        crow = tk.Frame(card, bg=C_CARD)
+        crow.pack(fill="x", padx=12, pady=(1, 3))
+        tk.Label(crow, text="Cookie：", bg=C_CARD, fg=C_MUTED,
+                 font=UI_FONT).pack(side="left")
+        self.cookie_var = tk.StringVar()
+        tk.Entry(crow, textvariable=self.cookie_var, font=UI_FONT, width=42,
+                 bg="white", fg=C_TEXT, relief="solid", bd=1).pack(
+            side="left", ipady=4)
+        ttk.Button(crow, text="选择 Netscape Cookie…", command=self._browse_cookie).pack(
+            side="left", padx=(8, 0))
+
         # 模型
         mrow = tk.Frame(card, bg=C_CARD)
         mrow.pack(fill="x", padx=12, pady=(2, 7))
@@ -632,6 +644,14 @@ class App:
         if path:
             self.source_var.set(path)
 
+    def _browse_cookie(self) -> None:
+        path = filedialog.askopenfilename(
+            title="选择 Netscape HTTP Cookie File",
+            filetypes=[("Cookie 文件", "*.txt *.cookies *.tsv"),
+                       ("所有文件", "*.*")])
+        if path:
+            self.cookie_var.set(path)
+
     def test_proxy(self) -> None:
         """就地检测代理端口通不通（不启动流水线）。"""
         raw = self.proxy_var.get().strip() or DEFAULT_PROXY
@@ -802,6 +822,9 @@ class App:
             proxy = self.proxy_var.get().strip()
             if proxy:
                 cmd += ["--proxy", proxy]
+        cookies = self.cookie_var.get().strip()
+        if cookies:
+            cmd += ["--cookies", cookies]
         return cmd
 
     def start(self) -> None:
@@ -833,6 +856,7 @@ class App:
 
     def _begin(self, status: str) -> None:
         self.running = True
+        self.stop_requested = False
         self.start_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
         self.env_btn.configure(state="disabled")
@@ -845,6 +869,7 @@ class App:
             return
         self.log_line("", "")
         self.log_line("收到停止请求，正在终止…", "warn")
+        self.stop_requested = True
         try:
             self.proc.terminate()
         except Exception as exc:
@@ -920,8 +945,7 @@ class App:
             self.log_line("", "")
             self.log_line("✓ 完成", "ok")
             self.refresh_outputs()
-        elif code in (-15, 1) and self.proc is None and not self.running:
-            # terminate() 在 Windows 上退出码不固定，只要不是 0 就按停止处理
+        elif self.stop_requested:
             self.set_status("已停止")
             self.log_line("已停止", "warn")
         else:
