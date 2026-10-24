@@ -300,11 +300,15 @@ $env:HF_ENDPOINT = "https://hf-mirror.com"
 `small` 在 CPU 上约 8 倍实时（1 小时视频约 8 分钟）。想更快用 `--model base`（约 20 倍实时）；想更准用 `--model medium`。
 装了 CUDA 运行库会自动用 GPU：`pip install nvidia-cublas-cu12 nvidia-cudnn-cu12`。
 GUI 和 CLI 都支持设备切换：`auto`、`cpu`、`cuda`、`npu`。Intel NPU 使用 OpenVINO Whisper int8 模型。
-OpenVINO 依赖可通过南京大学 PyPI 镜像安装：
+
+NPU 后端是**可选**的，OpenVINO 不在默认依赖里（要多下几百 MB）。只有确定自己有
+Intel NPU 时才需要装：
 
 ```powershell
-.venv\Scripts\python.exe -m pip install -i https://mirrors.nju.edu.cn/pypi/web/simple -r requirements.txt
+.venv\Scripts\python.exe -m pip install "openvino>=2026.4" "openvino-genai>=2026.4"
 ```
+
+不装也能正常跑 CPU / CUDA；如果选了 `--device npu` 而没装，会给出明确提示。
 
 **Q：界面上的「外部程序」「所在文件夹」按钮没反应**
 某些 Windows 环境（第三方 shell 扩展注入）会让 `explorer.exe` / `Code.exe` 以 `0xC0000142` 退出。可以用界面里的「复制全文」「复制路径」兜底，或运行 `tools/diag_open.bat` 生成诊断日志。

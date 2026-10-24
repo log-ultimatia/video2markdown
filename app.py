@@ -440,7 +440,9 @@ class App:
 
         brow = tk.Frame(card, bg=C_CARD)
         brow.pack(fill="x", padx=12, pady=(1, 3))
-        self.browser_cookies_var = tk.BooleanVar(value=True)
+        # 默认【关】：公开视频不需要 cookie。默认去读浏览器 cookie 库既让人意外，
+        # 又容易因为浏览器占用 cookie DB 而失败。需要登录的视频用户自己勾。
+        self.browser_cookies_var = tk.BooleanVar(value=False)
         tk.Checkbutton(
             brow, text="从浏览器读取 Cookies", variable=self.browser_cookies_var,
             bg=C_CARD, fg=C_MUTED, font=UI_FONT_SM,
