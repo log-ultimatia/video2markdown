@@ -83,6 +83,15 @@ DEVICE_CHOICES = (
     ("Intel Ultra NPU（OpenVINO）", "npu"),
 )
 
+BROWSER_COOKIE_CHOICES = (
+    ("Chrome", "chrome"),
+    ("Edge", "edge"),
+    ("Firefox", "firefox"),
+    ("Brave", "brave"),
+    ("Opera", "opera"),
+    ("Vivaldi", "vivaldi"),
+)
+
 # ---------------------------------------------------------------------------
 # 配色
 # ---------------------------------------------------------------------------
@@ -429,16 +438,36 @@ class App:
                        activebackground=C_CARD, selectcolor=C_CARD).pack(
             side="left", padx=(10, 0))
 
+        brow = tk.Frame(card, bg=C_CARD)
+        brow.pack(fill="x", padx=12, pady=(1, 3))
+        self.browser_cookies_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            brow, text="从浏览器读取 Cookies", variable=self.browser_cookies_var,
+            bg=C_CARD, fg=C_MUTED, font=UI_FONT_SM,
+            activebackground=C_CARD, selectcolor=C_CARD,
+            command=self._on_cookie_mode_change).pack(side="left")
+        self.browser_cookie_var = tk.StringVar(value="Chrome")
+        self.browser_cookie_box = ttk.Combobox(
+            brow, textvariable=self.browser_cookie_var, state="readonly", width=10,
+            values=[label for label, _ in BROWSER_COOKIE_CHOICES], font=UI_FONT)
+        self.browser_cookie_box.pack(side="left", padx=(8, 0))
+        tk.Label(brow, text="（可取消后使用 Netscape 文件）", bg=C_CARD,
+                 fg=C_MUTED, font=UI_FONT_SM).pack(side="left", padx=(8, 0))
+
         crow = tk.Frame(card, bg=C_CARD)
         crow.pack(fill="x", padx=12, pady=(1, 3))
-        tk.Label(crow, text="Cookie：", bg=C_CARD, fg=C_MUTED,
+        tk.Label(crow, text="Netscape Cookie：", bg=C_CARD, fg=C_MUTED,
                  font=UI_FONT).pack(side="left")
         self.cookie_var = tk.StringVar()
-        tk.Entry(crow, textvariable=self.cookie_var, font=UI_FONT, width=42,
-                 bg="white", fg=C_TEXT, relief="solid", bd=1).pack(
-            side="left", ipady=4)
-        ttk.Button(crow, text="选择 Netscape Cookie…", command=self._browse_cookie).pack(
+        self.cookie_entry = tk.Entry(crow, textvariable=self.cookie_var,
+                                     font=UI_FONT, width=42, bg="white",
+                                     fg=C_TEXT, relief="solid", bd=1)
+        self.cookie_entry.pack(side="left", ipady=4)
+        self.cookie_button = ttk.Button(
+            crow, text="选择 Netscape Cookie…", command=self._browse_cookie)
+        self.cookie_button.pack(
             side="left", padx=(8, 0))
+        self._on_cookie_mode_change()
 
         # 模型
         mrow = tk.Frame(card, bg=C_CARD)
@@ -689,6 +718,13 @@ class App:
         if path:
             self.cookie_var.set(path)
 
+    def _on_cookie_mode_change(self) -> None:
+        state = "disabled" if self.browser_cookies_var.get() else "normal"
+        self.cookie_entry.configure(state=state)
+        self.cookie_button.configure(state=state)
+        self.browser_cookie_box.configure(
+            state="readonly" if self.browser_cookies_var.get() else "disabled")
+
     def test_proxy(self) -> None:
         """就地检测代理端口通不通（不启动流水线）。"""
         raw = self.proxy_var.get().strip() or DEFAULT_PROXY
@@ -858,6 +894,13 @@ class App:
                 return code
         return "auto"
 
+    def _selected_browser_cookie(self) -> str:
+        cur = self.browser_cookie_var.get()
+        for label, code in BROWSER_COOKIE_CHOICES:
+            if label == cur:
+                return code
+        return "chrome"
+
     def _build_cmd(self, source: str) -> list:
         cmd = [str(_python_exe()), "-u", str(PIPELINE), source,
                "--model", self.model_var.get()]
@@ -873,9 +916,12 @@ class App:
             proxy = self.proxy_var.get().strip()
             if proxy:
                 cmd += ["--proxy", proxy]
-        cookies = self.cookie_var.get().strip()
-        if cookies:
-            cmd += ["--cookies", cookies]
+        if self.browser_cookies_var.get():
+            cmd += ["--cookies-from-browser", self._selected_browser_cookie()]
+        else:
+            cookies = self.cookie_var.get().strip()
+            if cookies:
+                cmd += ["--cookies", cookies]
         return cmd
 
     def start(self) -> None:

@@ -71,6 +71,9 @@ python pipeline.py URL --device npu --model small
 
 # 登录/会员视频：传入 Netscape HTTP Cookie File
 python pipeline.py URL --cookies D:\path\cookies.txt
+
+# 或直接从浏览器读取 Cookies
+python pipeline.py URL --cookies-from-browser chrome
 ```
 
 Or launch the GUI:
@@ -185,8 +188,11 @@ python pipeline.py URL --device npu --model small
 # 忽略断点缓存，从头转写
 python pipeline.py URL --no-resume
 
-# 登录/会员视频：传入导出的 Netscape HTTP Cookie File（不要使用浏览器自动读取）
+# 登录/会员视频：传入导出的 Netscape HTTP Cookie File
 python pipeline.py URL --cookies D:\path\cookies.txt
+
+# 或从浏览器读取 Cookies
+python pipeline.py URL --cookies-from-browser edge
 ```
 
 图形界面：

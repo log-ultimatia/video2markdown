@@ -323,6 +323,19 @@ def _cookie_file(path: Path | None) -> str | None:
     return str(path)
 
 
+def _browser_cookie_spec(raw: str | None) -> tuple | None:
+    """Convert yt-dlp's browser cookie spec into its Python tuple form."""
+    if not raw:
+        return None
+    parts = raw.strip().split(":")
+    if not parts[0]:
+        raise PipelineError("浏览器 Cookie 参数不能为空")
+    if len(parts) > 4:
+        raise PipelineError(
+            "浏览器 Cookie 参数格式错误：browser[:profile[:keyring[:container]]]" )
+    return tuple(parts + [None] * (4 - len(parts)))
+
+
 def _source_marker(path: Path) -> Path:
     return path.with_name(path.name + ".source.json")
 
@@ -370,7 +383,8 @@ def _save_source_marker(target: Path, source: Path) -> None:
 # 2. 下载层
 # ---------------------------------------------------------------------------
 def download_audio(url: str, proxy: str | None, force: bool = False,
-                   cookies: Path | None = None) -> tuple[Path, dict]:
+                   cookies: Path | None = None,
+                   cookies_from_browser: str | None = None) -> tuple[Path, dict]:
     """
     用 yt-dlp 下载【只有音频】的流。
 
@@ -407,6 +421,9 @@ def download_audio(url: str, proxy: str | None, force: bool = False,
     outtmpl = str(DOWNLOAD_DIR / "%(title).120s [%(id)s].%(ext)s")
 
     cookie_file = _cookie_file(cookies)
+    browser_cookie_spec = _browser_cookie_spec(cookies_from_browser)
+    if cookie_file and browser_cookie_spec:
+        raise PipelineError("--cookies 与 --cookies-from-browser 只能二选一")
 
     opts = {
         "format": "bestaudio/worst[acodec!=none][vcodec!=none]/best",
@@ -426,6 +443,8 @@ def download_audio(url: str, proxy: str | None, force: bool = False,
     }
     if cookie_file:
         opts["cookiefile"] = cookie_file
+    if browser_cookie_spec:
+        opts["cookiesfrombrowser"] = browser_cookie_spec
 
     def run(extra_opts: dict):
         with yt_dlp.YoutubeDL({**opts, **extra_opts}) as ydl:
@@ -457,7 +476,7 @@ def download_audio(url: str, proxy: str | None, force: bool = False,
         if "private" in msg.lower() or "sign in" in msg.lower():
             raise PipelineError(
                 "下载失败：这个视频需要登录或已设为私享/会员可见。\n"
-                "   请导出 Netscape HTTP Cookie File，然后使用 --cookies <文件路径>。\n"
+                "   请使用 --cookies <文件路径>，或 --cookies-from-browser <浏览器>。\n"
                 f"   yt-dlp 原始信息：{msg[:300]}"
             ) from exc
         raise PipelineError(f"下载失败（yt-dlp）：{msg[:400]}") from exc
@@ -1371,7 +1390,8 @@ def _fmt_clock(seconds: float) -> str:
 def run(url: str, proxy_arg: str | None, no_proxy: bool,
         model: str, force: bool, out: Path | None,
         lang: str | None = None, resume: bool = True,
-        cookies: Path | None = None, device_mode: str = "auto") -> int:
+        cookies: Path | None = None, device_mode: str = "auto",
+        cookies_from_browser: str | None = None) -> int:
     rep = Report()
 
     # 先查硬依赖：ffmpeg 缺失时没必要先花时间下载
@@ -1395,7 +1415,9 @@ def run(url: str, proxy_arg: str | None, no_proxy: bool,
 
         # 2. 下载
         t0 = time.time()
-        src, info = download_audio(url, proxy, force, cookies=cookies)
+        src, info = download_audio(
+            url, proxy, force, cookies=cookies,
+            cookies_from_browser=cookies_from_browser)
         rep.add("下载音频", time.time() - t0, src.name)
 
         # 3. 提取
@@ -1446,9 +1468,14 @@ def main() -> int:
     parser.add_argument("url", help="YouTube 视频链接")
     parser.add_argument("--proxy", help=f"代理地址（默认读环境变量，再退回 {DEFAULT_PROXY}）")
     parser.add_argument("--no-proxy", action="store_true", help="强制直连")
-    parser.add_argument(
+    cookie_group = parser.add_mutually_exclusive_group()
+    cookie_group.add_argument(
         "--cookies", type=Path,
         help="Netscape HTTP Cookie File 路径（用于需要登录的视频）")
+    cookie_group.add_argument(
+        "--cookies-from-browser",
+        metavar="BROWSER[:PROFILE[:KEYRING[:CONTAINER]]]",
+        help="从浏览器读取 Cookie，例如 chrome、edge 或 firefox:default")
     parser.add_argument(
         "--device", choices=DEVICE_MODES, default="auto",
         help="推理设备：auto（自动）、cpu、cuda、npu（OpenVINO Intel NPU）")
@@ -1477,7 +1504,8 @@ def main() -> int:
     return run(args.url, args.proxy, args.no_proxy,
                args.model, args.force, args.out, lang=args.lang,
                resume=not args.no_resume, cookies=args.cookies,
-               device_mode=args.device)
+               device_mode=args.device,
+               cookies_from_browser=args.cookies_from_browser)
 
 
 if __name__ == "__main__":
