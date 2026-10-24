@@ -107,6 +107,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+_CUDA_DLL_DIR_HANDLES = []
 
 # ---------------------------------------------------------------------------
 # 中文/多语言输出质量：initial_prompt + 繁简转换
@@ -643,13 +644,40 @@ def _cuda_libs_present() -> bool:
     if os.name != "nt":
         return True          # 非 Windows 维持原来的逻辑
     import ctypes
-    for name in ("cublas64_12.dll", "cublasLt64_12.dll", "cublas64_11.dll"):
+
+    # pip NVIDIA wheels install DLLs under site-packages/nvidia/*/bin, which
+    # Windows does not search automatically when loading by DLL name.
+    if hasattr(os, "add_dll_directory"):
+        for entry in sys.path:
+            nvidia_dir = Path(entry) / "nvidia"
+            if not nvidia_dir.is_dir():
+                continue
+            for dll_dir in nvidia_dir.glob("*/bin"):
+                try:
+                    _CUDA_DLL_DIR_HANDLES.append(
+                        os.add_dll_directory(str(dll_dir)))
+                except OSError:
+                    continue
+
+    cublas_names = ("cublas64_12.dll", "cublas64_11.dll")
+    cudnn_names = ("cudnn64_9.dll", "cudnn64_8.dll")
+    cublas_ok = False
+    cudnn_ok = False
+    for name in cublas_names:
         try:
             ctypes.WinDLL(name)
-            return True
+            cublas_ok = True
+            break
         except OSError:
             continue
-    return False
+    for name in cudnn_names:
+        try:
+            ctypes.WinDLL(name)
+            cudnn_ok = True
+            break
+        except OSError:
+            continue
+    return cublas_ok and cudnn_ok
 
 
 def _is_cuda_runtime_error(exc: Exception) -> bool:
@@ -681,8 +709,9 @@ def _device_candidates(mode: str) -> list[tuple[str, str]]:
     if mode == "cuda":
         if not _cuda_libs_present():
             raise PipelineError(
-                "已强制选择 CUDA，但当前环境缺少 CUDA 运行库。\n"
-                "   请安装：pip install nvidia-cublas-cu12 nvidia-cudnn-cu12\n"
+                "已强制选择 CUDA，但 cuBLAS/cuDNN 运行库无法加载。\n"
+                "   请确认当前 Python 环境已安装 nvidia-cublas-cu12 和 "
+                "nvidia-cudnn-cu12，并更新 NVIDIA 显卡驱动。\n"
                 "   或改选“自动”，让程序使用 CPU。")
         return [("cuda", "float16")]
     candidates = [("cuda", "float16"), ("cpu", "int8")]
@@ -1199,8 +1228,9 @@ def _explain_model_error(exc: Exception) -> str:
         )
     if _is_cuda_runtime_error(exc):
         return (
-            "CUDA 运行库不可用，且退回 CPU 也失败了。\n"
-            "   装运行库：pip install nvidia-cublas-cu12 nvidia-cudnn-cu12\n"
+            "CUDA 推理失败，且退回 CPU 也失败了。\n"
+            "   请确认当前 Python 环境中的 nvidia-cublas-cu12 / "
+            "nvidia-cudnn-cu12 DLL 可加载，并更新 NVIDIA 显卡驱动。\n"
             f"   原始错误：{type(exc).__name__}: {text[:200]}"
         )
     return f"转写失败：{type(exc).__name__}: {text[:400]}"

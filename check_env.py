@@ -36,6 +36,7 @@ import socket
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -191,25 +192,45 @@ def check_ffmpeg(rep: Report) -> None:
 # ---------------------------------------------------------------------------
 # 3. 代理端口（socket 连通性测试，不发数据包）
 # ---------------------------------------------------------------------------
-def check_proxy(rep: Report, port: int) -> bool:
-    print(f"\n[3/6] 代理端口 127.0.0.1:{port}（socket 连通性）")
+def _parse_proxy(raw: str) -> tuple[str | None, int | None, str | None]:
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=3):
+        parsed = urllib.parse.urlparse(
+            raw if "://" in raw else f"http://{raw}")
+        host = parsed.hostname
+        port = parsed.port or 7890
+        scheme = parsed.scheme.lower() or "http"
+        if not host or not (1 <= port <= 65535):
+            return None, None, None
+        return host, port, scheme
+    except ValueError:
+        return None, None, None
+
+
+def check_proxy(rep: Report, proxy: str) -> bool:
+    host, port, _scheme = _parse_proxy(proxy)
+    if host is None or port is None:
+        rep.warn("代理地址格式无效", proxy,
+                 hint="使用 host:port 或完整地址，例如 http://127.0.0.1:7890。")
+        return False
+    endpoint = f"{host}:{port}"
+    print(f"\n[3/6] 代理端口 {endpoint}（socket 连通性）")
+    try:
+        with socket.create_connection((host, port), timeout=3):
             pass
     except socket.timeout:
-        rep.warn(f"连接 127.0.0.1:{port} 超时",
+        rep.warn(f"连接 {endpoint} 超时",
                  hint="没有本地代理时可使用 pipeline.py --no-proxy；需要访问 YouTube 时再配置代理。")
         return False
     except ConnectionRefusedError:
-        rep.warn(f"127.0.0.1:{port} 拒绝连接",
+        rep.warn(f"{endpoint} 拒绝连接",
                  hint="没有本地代理时可使用 pipeline.py --no-proxy；需要访问 YouTube 时再配置代理。")
         return False
     except OSError as exc:
-        rep.warn(f"连接 127.0.0.1:{port} 失败", f"{type(exc).__name__}: {exc}",
+        rep.warn(f"连接 {endpoint} 失败", f"{type(exc).__name__}: {exc}",
                  hint="代理是可选项；需要访问 YouTube 时请配置可用代理。")
         return False
 
-    rep.ok(f"127.0.0.1:{port} 可以连上", "端口在监听")
+    rep.ok(f"{endpoint} 可以连上", "端口在监听")
     return True
 
 
@@ -246,12 +267,7 @@ def check_packages(rep: Report) -> None:
             rep.ok("ctranslate2", f"{ctranslate2.__version__}  CPU: {sorted(cpu)}")
             try:
                 ctranslate2.get_supported_compute_types("cuda")
-                cuda_runtime = True
-                if os.name == "nt":
-                    import ctypes
-                    cuda_runtime = any(
-                        _dll_loadable(name) for name in
-                        ("cublas64_12.dll", "cublasLt64_12.dll", "cublas64_11.dll"))
+                cuda_runtime = _cuda_runtime_available()
                 if cuda_runtime:
                     rep.ok("CUDA 可用", "转写会自动用 GPU")
                 else:
@@ -275,13 +291,36 @@ def check_packages(rep: Report) -> None:
             rep.warn("无法探测 Intel NPU", f"{type(exc).__name__}: {exc}")
 
 
-def _dll_loadable(name: str) -> bool:
-    try:
-        import ctypes
-        ctypes.WinDLL(name)
+def _cuda_runtime_available() -> bool:
+    """Check CUDA runtime DLLs, including NVIDIA pip wheel locations on Windows."""
+    if os.name != "nt":
         return True
-    except OSError:
+
+    import ctypes
+
+    handles = []
+    if hasattr(os, "add_dll_directory"):
+        for entry in sys.path:
+            nvidia_dir = Path(entry) / "nvidia"
+            if not nvidia_dir.is_dir():
+                continue
+            for dll_dir in nvidia_dir.glob("*/bin"):
+                try:
+                    handles.append(os.add_dll_directory(str(dll_dir)))
+                except OSError:
+                    continue
+
+    def load_any(names: tuple[str, ...]) -> bool:
+        for name in names:
+            try:
+                ctypes.WinDLL(name)
+                return True
+            except OSError:
+                continue
         return False
+
+    return (load_any(("cublas64_12.dll", "cublas64_11.dll"))
+            and load_any(("cudnn64_9.dll", "cudnn64_8.dll")))
 
 
 def _dist_version(dist: str) -> str:
@@ -311,17 +350,24 @@ def check_dirs(rep: Report) -> None:
 # ---------------------------------------------------------------------------
 # 6. 代理能否真正转发（提示性）
 # ---------------------------------------------------------------------------
-def check_proxy_forwarding(rep: Report, port: int) -> None:
+def check_proxy_forwarding(rep: Report, proxy: str | None) -> None:
     print(f"\n[6/6] 代理能否真正转发 HTTPS 请求（提示性）")
-    proxy = f"http://127.0.0.1:{port}"
 
     # 关键点：urllib 默认会读系统代理，所以测试"直连"时必须显式清空，
     # 否则测出来的还是代理通道，结论会骗人。
     direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    via_proxy = urllib.request.build_opener(
-        urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+    checks = [("直连", direct)]
+    if proxy:
+        _host, _port, scheme = _parse_proxy(proxy)
+        if scheme in ("http", "https"):
+            via_proxy = urllib.request.build_opener(
+                urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+            checks.append(("走代理", via_proxy))
+        else:
+            rep.warn("跳过代理 HTTPS 转发探测",
+                     f"环境自检目前不能用 urllib 测试 {scheme} 代理；已检查端口连通性。")
 
-    for label, opener in (("直连", direct), ("走代理", via_proxy)):
+    for label, opener in checks:
         try:
             resp = opener.open(PROBE_URL, timeout=10)
             rep.ok(f"{label} {PROBE_URL}", f"HTTP {resp.status}")
@@ -344,9 +390,12 @@ def check_proxy_forwarding(rep: Report, port: int) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="YouTube → Markdown 流水线的环境自检（只用标准库）")
+    parser.add_argument("--proxy", help="代理地址，例如 http://127.0.0.1:7890")
+    parser.add_argument("--no-proxy", action="store_true",
+                        help="不检查代理，直接测试网络连接")
     parser.add_argument("--proxy-port", type=int,
                         default=int(os.environ.get("PROXY_PORT", "7890")),
-                        help="本地代理端口，默认 7890（也可用环境变量 PROXY_PORT）")
+                        help="兼容旧用法：127.0.0.1 的代理端口")
     parser.add_argument("--no-net", action="store_true",
                         help="跳过第 6 项的网络探测")
     args = parser.parse_args()
@@ -366,14 +415,21 @@ def main() -> int:
     rep = Report()
     check_python(rep)
     check_ffmpeg(rep)
-    proxy_open = check_proxy(rep, args.proxy_port)
+    proxy = args.proxy or f"http://127.0.0.1:{args.proxy_port}"
+    if args.no_proxy:
+        print("\n[3/6] 代理端口测试  已跳过（GUI/CLI 已选择不使用代理）")
+        proxy_open = False
+    else:
+        proxy_open = check_proxy(rep, proxy)
     check_packages(rep)
     check_dirs(rep)
 
     if args.no_net:
         print("\n[6/6] 代理转发测试  已跳过（--no-net）")
+    elif args.no_proxy:
+        check_proxy_forwarding(rep, None)
     elif proxy_open:
-        check_proxy_forwarding(rep, args.proxy_port)
+        check_proxy_forwarding(rep, proxy)
     else:
         print("\n[6/6] 代理转发测试  跳过（端口不可用）")
 

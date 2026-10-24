@@ -712,7 +712,13 @@ class App:
             messagebox.showerror("缺文件", f"找不到 {CHECK_ENV.name}")
             return
         self.log_line("=== 环境自检 ===", "step")
-        self._launch([str(py), str(CHECK_ENV)],
+        cmd = [str(py), str(CHECK_ENV)]
+        if self.no_proxy_var.get():
+            cmd.append("--no-proxy")
+        else:
+            proxy = self.proxy_var.get().strip() or DEFAULT_PROXY
+            cmd += ["--proxy", proxy]
+        self._launch(cmd,
                      "正在检查环境…", on_done_status=None)
 
     def run_diagnostics(self) -> None:
