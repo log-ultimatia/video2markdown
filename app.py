@@ -76,6 +76,22 @@ MODEL_CHOICES = (
     ("medium", "最准，慢约 2 倍（1.5GB）"),
 )
 
+DEVICE_CHOICES = (
+    ("自动（推荐）", "auto"),
+    ("CPU（int8）", "cpu"),
+    ("NVIDIA CUDA GPU", "cuda"),
+    ("Intel Ultra NPU（OpenVINO）", "npu"),
+)
+
+BROWSER_COOKIE_CHOICES = (
+    ("Chrome", "chrome"),
+    ("Edge", "edge"),
+    ("Firefox", "firefox"),
+    ("Brave", "brave"),
+    ("Opera", "opera"),
+    ("Vivaldi", "vivaldi"),
+)
+
 # ---------------------------------------------------------------------------
 # 配色
 # ---------------------------------------------------------------------------
@@ -124,6 +140,7 @@ class App:
         self.proc: subprocess.Popen | None = None
         self.worker: threading.Thread | None = None
         self.running = False
+        self.stop_requested = False
         self.last_md: Path | None = None
 
         # 关键：接管 tkinter 的异常回调。
@@ -421,6 +438,39 @@ class App:
                        activebackground=C_CARD, selectcolor=C_CARD).pack(
             side="left", padx=(10, 0))
 
+        brow = tk.Frame(card, bg=C_CARD)
+        brow.pack(fill="x", padx=12, pady=(1, 3))
+        # 默认【关】：公开视频不需要 cookie。默认去读浏览器 cookie 库既让人意外，
+        # 又容易因为浏览器占用 cookie DB 而失败。需要登录的视频用户自己勾。
+        self.browser_cookies_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            brow, text="从浏览器读取 Cookies", variable=self.browser_cookies_var,
+            bg=C_CARD, fg=C_MUTED, font=UI_FONT_SM,
+            activebackground=C_CARD, selectcolor=C_CARD,
+            command=self._on_cookie_mode_change).pack(side="left")
+        self.browser_cookie_var = tk.StringVar(value="Chrome")
+        self.browser_cookie_box = ttk.Combobox(
+            brow, textvariable=self.browser_cookie_var, state="readonly", width=10,
+            values=[label for label, _ in BROWSER_COOKIE_CHOICES], font=UI_FONT)
+        self.browser_cookie_box.pack(side="left", padx=(8, 0))
+        tk.Label(brow, text="（可取消后使用 Netscape 文件）", bg=C_CARD,
+                 fg=C_MUTED, font=UI_FONT_SM).pack(side="left", padx=(8, 0))
+
+        crow = tk.Frame(card, bg=C_CARD)
+        crow.pack(fill="x", padx=12, pady=(1, 3))
+        tk.Label(crow, text="Netscape Cookie：", bg=C_CARD, fg=C_MUTED,
+                 font=UI_FONT).pack(side="left")
+        self.cookie_var = tk.StringVar()
+        self.cookie_entry = tk.Entry(crow, textvariable=self.cookie_var,
+                                     font=UI_FONT, width=42, bg="white",
+                                     fg=C_TEXT, relief="solid", bd=1)
+        self.cookie_entry.pack(side="left", ipady=4)
+        self.cookie_button = ttk.Button(
+            crow, text="选择 Netscape Cookie…", command=self._browse_cookie)
+        self.cookie_button.pack(
+            side="left", padx=(8, 0))
+        self._on_cookie_mode_change()
+
         # 模型
         mrow = tk.Frame(card, bg=C_CARD)
         mrow.pack(fill="x", padx=12, pady=(2, 7))
@@ -452,6 +502,20 @@ class App:
                        bg=C_CARD, fg=C_MUTED, font=UI_FONT_SM,
                        activebackground=C_CARD, selectcolor=C_CARD).pack(
             side="left", padx=(14, 0))
+
+        drow = tk.Frame(card, bg=C_CARD)
+        drow.pack(fill="x", padx=12, pady=(1, 3))
+        tk.Label(drow, text="设备：", bg=C_CARD, fg=C_MUTED,
+                 font=UI_FONT).pack(side="left")
+        self.device_var = tk.StringVar(value="自动（推荐）")
+        self.device_box = ttk.Combobox(
+            drow, textvariable=self.device_var, state="readonly", width=28,
+            values=[label for label, _ in DEVICE_CHOICES], font=UI_FONT)
+        self.device_box.pack(side="left")
+        self.device_tip = tk.Label(drow, text="自动检测 CUDA，不可用时使用 CPU",
+                                   bg=C_CARD, fg=C_MUTED, font=UI_FONT_SM)
+        self.device_tip.pack(side="left", padx=(8, 0))
+        self.device_box.bind("<<ComboboxSelected>>", self._on_device_change)
 
         self.dnd_hint = tk.Label(
             card, text="提示：直接粘贴 YouTube 链接即可；中英混排的视频请保持「自动检测/混合」",
@@ -624,6 +688,22 @@ class App:
                 self.model_tip.configure(text=tip)
                 return
 
+    def _on_device_change(self, _e=None) -> None:
+        mode = self._selected_device()
+        if mode == "npu":
+            self.device_tip.configure(
+                text="OpenVINO Whisper NPU",
+                fg=C_MUTED)
+        elif mode == "cuda":
+            self.device_tip.configure(
+                text="需要 NVIDIA CUDA/cuBLAS/cuDNN 运行库",
+                fg=C_MUTED)
+        elif mode == "cpu":
+            self.device_tip.configure(text="强制使用 CPU int8", fg=C_MUTED)
+        else:
+            self.device_tip.configure(
+                text="自动检测 CUDA，不可用时使用 CPU", fg=C_MUTED)
+
     def _browse(self) -> None:
         path = filedialog.askopenfilename(
             title="选择视频或音频文件",
@@ -631,6 +711,21 @@ class App:
                        ("所有文件", "*.*")])
         if path:
             self.source_var.set(path)
+
+    def _browse_cookie(self) -> None:
+        path = filedialog.askopenfilename(
+            title="选择 Netscape HTTP Cookie File",
+            filetypes=[("Cookie 文件", "*.txt *.cookies *.tsv"),
+                       ("所有文件", "*.*")])
+        if path:
+            self.cookie_var.set(path)
+
+    def _on_cookie_mode_change(self) -> None:
+        state = "disabled" if self.browser_cookies_var.get() else "normal"
+        self.cookie_entry.configure(state=state)
+        self.cookie_button.configure(state=state)
+        self.browser_cookie_box.configure(
+            state="readonly" if self.browser_cookies_var.get() else "disabled")
 
     def test_proxy(self) -> None:
         """就地检测代理端口通不通（不启动流水线）。"""
@@ -655,7 +750,13 @@ class App:
             messagebox.showerror("缺文件", f"找不到 {CHECK_ENV.name}")
             return
         self.log_line("=== 环境自检 ===", "step")
-        self._launch([str(py), str(CHECK_ENV)],
+        cmd = [str(py), str(CHECK_ENV)]
+        if self.no_proxy_var.get():
+            cmd.append("--no-proxy")
+        else:
+            proxy = self.proxy_var.get().strip() or DEFAULT_PROXY
+            cmd += ["--proxy", proxy]
+        self._launch(cmd,
                      "正在检查环境…", on_done_status=None)
 
     def run_diagnostics(self) -> None:
@@ -788,12 +889,27 @@ class App:
                 return code
         return None
 
+    def _selected_device(self) -> str:
+        cur = self.device_var.get()
+        for label, code in DEVICE_CHOICES:
+            if label == cur:
+                return code
+        return "auto"
+
+    def _selected_browser_cookie(self) -> str:
+        cur = self.browser_cookie_var.get()
+        for label, code in BROWSER_COOKIE_CHOICES:
+            if label == cur:
+                return code
+        return "chrome"
+
     def _build_cmd(self, source: str) -> list:
         cmd = [str(_python_exe()), "-u", str(PIPELINE), source,
                "--model", self.model_var.get()]
         lang = self._selected_lang()
         if lang:
             cmd += ["--lang", lang]
+        cmd += ["--device", self._selected_device()]
         if not self.resume_var.get():
             cmd.append("--no-resume")
         if self.no_proxy_var.get():
@@ -802,6 +918,12 @@ class App:
             proxy = self.proxy_var.get().strip()
             if proxy:
                 cmd += ["--proxy", proxy]
+        if self.browser_cookies_var.get():
+            cmd += ["--cookies-from-browser", self._selected_browser_cookie()]
+        else:
+            cookies = self.cookie_var.get().strip()
+            if cookies:
+                cmd += ["--cookies", cookies]
         return cmd
 
     def start(self) -> None:
@@ -818,6 +940,7 @@ class App:
         self.log_line("", "")
         self.log_line(f"=== 开始生成 ===", "step")
         self.log_line(f"  模型 {self.model_var.get()}　"
+                      f"设备 {self._selected_device()}　"
                       f"{'直连' if self.no_proxy_var.get() else '代理 ' + (self.proxy_var.get() or DEFAULT_PROXY)}",
                       "dim")
         self._launch(cmd, "正在启动…", on_done_status="完成")
@@ -833,6 +956,7 @@ class App:
 
     def _begin(self, status: str) -> None:
         self.running = True
+        self.stop_requested = False
         self.start_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
         self.env_btn.configure(state="disabled")
@@ -845,6 +969,7 @@ class App:
             return
         self.log_line("", "")
         self.log_line("收到停止请求，正在终止…", "warn")
+        self.stop_requested = True
         try:
             self.proc.terminate()
         except Exception as exc:
@@ -920,8 +1045,7 @@ class App:
             self.log_line("", "")
             self.log_line("✓ 完成", "ok")
             self.refresh_outputs()
-        elif code in (-15, 1) and self.proc is None and not self.running:
-            # terminate() 在 Windows 上退出码不固定，只要不是 0 就按停止处理
+        elif self.stop_requested:
             self.set_status("已停止")
             self.log_line("已停止", "warn")
         else:

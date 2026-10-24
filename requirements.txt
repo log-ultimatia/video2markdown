@@ -18,8 +18,8 @@ ctranslate2>=4.5,<5
 
 # --- 下载 ---
 yt-dlp>=2025.1.1
-# 走 socks5 代理时才需要；http 代理不需要
-# PySocks>=1.7.1
+# SOCKS4/5 代理支持（HTTP 代理也可正常使用）
+PySocks>=1.7.1
 
 # --- 中文繁简转换（可选但推荐）---
 # 中文提示词已经能让 Whisper 输出简体，这一层是兜底；
@@ -28,6 +28,14 @@ opencc-python-reimplemented>=0.1.7
 
 # --- 数值计算 ---
 numpy>=1.26
+
+# --- Intel NPU（可选后端，默认不装）---
+# 只有用 `--device npu` 才需要。代码里是懒加载的：没装这两个包，
+# 默认的 CPU / CUDA 路径完全不受影响。
+# 装上要多几百 MB ~ 1GB，所以不放在默认依赖里。需要时手动装：
+#     pip install openvino>=2026.4 openvino-genai>=2026.4
+# openvino>=2026.4,<2027
+# openvino-genai>=2026.4,<2027
 
 # 说明：以下包是 faster-whisper 的传递依赖，不直接调用，列在这里是为了
 # 在依赖解析出问题时能快速定位版本：

@@ -62,6 +62,18 @@ python pipeline.py URL --proxy http://127.0.0.1:7890
 
 # Force a language instead of auto-detecting
 python pipeline.py URL --lang en
+
+# 选择推理设备：auto / cpu / cuda
+python pipeline.py URL --device cuda
+
+# Intel Ultra NPU（OpenVINO）
+python pipeline.py URL --device npu --model small
+
+# 登录/会员视频：传入 Netscape HTTP Cookie File
+python pipeline.py URL --cookies D:\path\cookies.txt
+
+# 或直接从浏览器读取 Cookies
+python pipeline.py URL --cookies-from-browser chrome
 ```
 
 Or launch the GUI:
@@ -170,8 +182,17 @@ python pipeline.py URL --proxy http://127.0.0.1:7890
 # 强制语言，跳过自动检测
 python pipeline.py URL --lang zh
 
+# 选择推理设备（Intel Ultra NPU）
+python pipeline.py URL --device npu --model small
+
 # 忽略断点缓存，从头转写
 python pipeline.py URL --no-resume
+
+# 登录/会员视频：传入导出的 Netscape HTTP Cookie File
+python pipeline.py URL --cookies D:\path\cookies.txt
+
+# 或从浏览器读取 Cookies
+python pipeline.py URL --cookies-from-browser edge
 ```
 
 图形界面：
@@ -201,7 +222,7 @@ Windows 用户还可以用 `create_shortcut.ps1` 生成桌面快捷方式（带�
 | 层 | 做什么 | 关键实现 |
 |---|---|---|
 | 1 | 解析代理 | CLI > 硬编码 > 环境变量 > 默认 7890，带端口连通性检测 |
-| 2 | 下载音频 | `yt-dlp`，`format=bestaudio`（只取音轨：110 分钟视频 50MB 而不是 220MB） |
+| 2 | 下载音频 | `yt-dlp` 优先只取独立音轨；没有独立音轨时选最低画质的合并流 |
 | 3 | 提取音频 | `ffmpeg -vn -ac 1 -ar 16000 -c:a pcm_s16le` |
 | 4 | 语音转文字 | `faster-whisper` + CTranslate2，CPU int8 / GPU float16 |
 | 5 | 生成 Markdown | 相邻字幕按语义合并成 ~180 字段落 |
@@ -278,6 +299,16 @@ $env:HF_ENDPOINT = "https://hf-mirror.com"
 **Q：转写很慢**
 `small` 在 CPU 上约 8 倍实时（1 小时视频约 8 分钟）。想更快用 `--model base`（约 20 倍实时）；想更准用 `--model medium`。
 装了 CUDA 运行库会自动用 GPU：`pip install nvidia-cublas-cu12 nvidia-cudnn-cu12`。
+GUI 和 CLI 都支持设备切换：`auto`、`cpu`、`cuda`、`npu`。Intel NPU 使用 OpenVINO Whisper int8 模型。
+
+NPU 后端是**可选**的，OpenVINO 不在默认依赖里（要多下几百 MB）。只有确定自己有
+Intel NPU 时才需要装：
+
+```powershell
+.venv\Scripts\python.exe -m pip install "openvino>=2026.4" "openvino-genai>=2026.4"
+```
+
+不装也能正常跑 CPU / CUDA；如果选了 `--device npu` 而没装，会给出明确提示。
 
 **Q：界面上的「外部程序」「所在文件夹」按钮没反应**
 某些 Windows 环境（第三方 shell 扩展注入）会让 `explorer.exe` / `Code.exe` 以 `0xC0000142` 退出。可以用界面里的「复制全文」「复制路径」兜底，或运行 `tools/diag_open.bat` 生成诊断日志。
