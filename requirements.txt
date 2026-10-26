@@ -37,6 +37,12 @@ numpy>=1.26
 # openvino>=2026.4,<2027
 # openvino-genai>=2026.4,<2027
 
+# --- 说话人分离（可选后端，默认不装）---
+# 只有用 `--diarize` 才需要。约 2 MB，不需要 PyTorch。
+# 首次运行会自动下载 34MB 模型（分割 6.6MB + 说话人嵌入 27MB）。
+#     pip install sherpa-onnx
+# sherpa-onnx>=2.0
+
 # 说明：以下包是 faster-whisper 的传递依赖，不直接调用，列在这里是为了
 # 在依赖解析出问题时能快速定位版本：
 #   av, tokenizers, huggingface-hub, onnxruntime, tqdm, protobuf, flatbuffers

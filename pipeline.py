@@ -36,6 +36,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+import diarize
+
 # ---------------------------------------------------------------------------
 # 路径与默认配置
 # ---------------------------------------------------------------------------
@@ -826,7 +828,8 @@ def _get_model(model_cls, model_size: str, device: str, compute_type: str):
 def _run_once_npu(model_size: str, audio, lang: str | None = None,
                   prompt: str | None = None, base_offset: float = 0.0,
                   chunk_idx: int = 0, chunk_total: int = 1,
-                  on_segment=None, skip_before: float = -1.0):
+                  on_segment=None, skip_before: float = -1.0,
+                  spans: list | None = None):
     """Transcribe one chunk through OpenVINO GenAI on Intel NPU."""
     import numpy as np
     from types import SimpleNamespace
@@ -869,6 +872,8 @@ def _run_once_npu(model_size: str, audio, lang: str | None = None,
         start = round(float(chunk.start_ts) + base_offset, 3)
         end = round(float(chunk.end_ts) + base_offset, 3)
         item = {"start": start, "end": end, "text": text}
+        if spans:
+            item["speaker"] = diarize.best_speaker(spans, start, end)
         if skip_before >= 0 and start < skip_before - 0.05:
             continue
         segments.append(item)
@@ -885,7 +890,8 @@ def _run_once(model_cls, model_size: str, device: str, compute_type: str,
               audio, lang: str | None = None, prompt: str | None = None,
               base_offset: float = 0.0,
               chunk_idx: int = 0, chunk_total: int = 1,
-              on_segment=None, skip_before: float = -1.0):
+              on_segment=None, skip_before: float = -1.0,
+              spans: list | None = None):
     """
     在一个音频片段上完整跑一遍识别。
 
@@ -902,7 +908,7 @@ def _run_once(model_cls, model_size: str, device: str, compute_type: str,
             model_size, audio, lang=lang, prompt=prompt,
             base_offset=base_offset, chunk_idx=chunk_idx,
             chunk_total=chunk_total, on_segment=on_segment,
-            skip_before=skip_before)
+            skip_before=skip_before, spans=spans)
 
     model = _get_model(model_cls, model_size, device, compute_type)
 
@@ -947,11 +953,15 @@ def _run_once(model_cls, model_size: str, device: str, compute_type: str,
         text = seg.text or ""
         if text and do_simplify:
             text = to_simplified(text)
+        abs_start = (seg.start or 0.0) + base_offset
+        abs_end = (seg.end or 0.0) + base_offset
         item = {
-            "start": round((seg.start or 0.0) + base_offset, 3),
-            "end": round((seg.end or 0.0) + base_offset, 3),
+            "start": round(abs_start, 3),
+            "end": round(abs_end, 3),
             "text": text,
         }
+        if spans:
+            item["speaker"] = diarize.best_speaker(spans, abs_start, abs_end)
         # 续跑时开头会与上次已存的部分重叠，这段丢掉避免重复
         if skip_before >= 0 and item["start"] < skip_before - 0.05:
             continue
@@ -972,6 +982,7 @@ class Seg:
     start: float
     end: float
     text: str
+    speaker: int | None = None      # 说话人编号（0 起），没做分离时为 None
 
 
 # ---------------------------------------------------------------------------
@@ -982,14 +993,14 @@ def _ckpt_path(wav: Path) -> Path:
 
 
 def _ckpt_signature(wav: Path, model_size: str, lang: str | None,
-                    device_mode: str = "auto") -> str:
+                    device_mode: str = "auto", diarize_sig: str = "") -> str:
     """
     检查点的"指纹"。音频文件、模型、语言、分块大小任何一个变了，
     旧结果都不能复用（否则会把不同模型/不同参数的结果混在一起）。
     """
     st = wav.stat()
     return (f"v{CKPT_VERSION}|{model_size}|{lang or 'auto+multi'}|{device_mode}"
-            f"|{CHUNK_SEC}|{st.st_size}|{int(st.st_mtime)}")
+            f"|{diarize_sig}|{CHUNK_SEC}|{st.st_size}|{int(st.st_mtime)}")
 
 
 def _load_ckpt(wav: Path, sig: str) -> list:
@@ -1065,7 +1076,11 @@ def _chunk_ranges(audio, rate: int, chunk_sec: float) -> list:
 
 def transcribe(wav: Path, model_size: str = WHISPER_MODEL,
                lang: str | None = None, resume: bool = True,
-               device_mode: str = "auto"):
+               device_mode: str = "auto",
+               with_speakers: bool = False,
+               diarize_threshold: float = diarize.DEFAULT_THRESHOLD,
+               num_speakers: int = -1,
+               proxy: str | None = None):
     """
     用 faster-whisper 做语音识别，返回 (段落列表, 识别信息, 耗时秒)。
 
@@ -1106,7 +1121,22 @@ def transcribe(wav: Path, model_size: str = WHISPER_MODEL,
     total_sec = len(audio) / rate
     print(f"  音频 {_fmt_duration(total_sec)}")
 
-    sig = _ckpt_signature(wav, model_size, lang, device_mode)
+    # 说话人分离（可选）：放在转写【之前】做。
+    # 这样每条字幕落下时就带着 speaker，断点存档里也有，续跑不用重做分离。
+    spans: list = []
+    if with_speakers:
+        print("  说话人分离…（首次会下载 34MB 模型）")
+        try:
+            spans, spk_count, spk_sec = diarize.run(
+                audio, MODEL_DIR, threshold=diarize_threshold,
+                num_speakers=num_speakers, proxy=proxy)
+        except diarize.DiarizeError as exc:
+            raise PipelineError(f"说话人分离失败：\n{exc}") from exc
+        print(f"  [OK] 检测到 {spk_count} 个说话人（{len(spans)} 段），"
+              f"分离耗时 {spk_sec:.1f}s")
+
+    diarize_sig = (f"spk{num_speakers}@{diarize_threshold}" if with_speakers else "spkoff")
+    sig = _ckpt_signature(wav, model_size, lang, device_mode, diarize_sig)
     saved = _load_ckpt(wav, sig) if resume else []
     if not resume and _ckpt_path(wav).exists():
         print("  已指定 --no-resume，忽略旧检查点")
@@ -1184,7 +1214,8 @@ def transcribe(wav: Path, model_size: str = WHISPER_MODEL,
                     base_offset=s / rate,
                     chunk_idx=idx, chunk_total=n,
                     on_segment=persist,
-                    skip_before=resume_at if idx == 0 else -1.0)
+                    skip_before=resume_at if idx == 0 else -1.0,
+                    spans=spans)
                 chosen = (device, ctype)
                 last_info = info
                 if idx == 0:
@@ -1209,7 +1240,7 @@ def transcribe(wav: Path, model_size: str = WHISPER_MODEL,
               f" —— 现在停止也不会白跑")
 
     saved.sort(key=lambda d: d["start"])
-    all_segs = [Seg(d["start"], d["end"], d["text"]) for d in saved]
+    all_segs = [Seg(d["start"], d["end"], d["text"], d.get("speaker")) for d in saved]
 
     elapsed = time.time() - started
     audio_sec = total_sec or 0
@@ -1261,7 +1292,7 @@ def _explain_model_error(exc: Exception) -> str:
 def group_paragraphs(segments, max_chars: int = PARAGRAPH_CHARS,
                      gap: float = PARAGRAPH_GAP):
     """
-    把逐条字幕合并成可读段落，返回 [(起始秒, 结束秒, 文本), ...]。
+    把逐条字幕合并成可读段落，返回 [(起始秒, 结束秒, 文本, 说话人), ...]。
 
     为什么不能一条字幕一个标题：
         一节 40 分钟的课有 1000+ 条字幕，每条都 `## 时间` 会得到一份
@@ -1269,29 +1300,37 @@ def group_paragraphs(segments, max_chars: int = PARAGRAPH_CHARS,
 
     分段规则（满足任一就另起一段）：
         · 当前段字数达到 max_chars
-        · 与上一条字幕的间隔超过 gap 秒（说明说话人停顿了，是天然段落边界）
+        · 与上一条字幕的间隔超过 gap 秒（说话人停顿，是天然段落边界）
+        · 说话人变了 —— 做过说话人分离时必须切，否则两个人混在同一段里读不出来
+
+    说话人为 None（没开分离）时，行为与之前完全一致。
     """
     blocks = []
     buf: list[str] = []
     start = prev_end = None
     chars = 0
+    speaker = None
 
     for seg in segments:
         text = (seg.text or "").strip()
         if not text:
             continue
-        if buf and (chars >= max_chars or (seg.start - prev_end) > gap):
-            blocks.append((start, prev_end, _join_text(buf)))
+        spk = getattr(seg, "speaker", None)
+        switched = buf and spk != speaker
+        if buf and (chars >= max_chars or (seg.start - prev_end) > gap or switched):
+            blocks.append((start, prev_end, _join_text(buf), speaker))
             buf, chars, start = [], 0, None
         if start is None:
             start = seg.start
+            speaker = spk
         buf.append(text)
         chars += len(text)
         prev_end = seg.end
 
     if buf and start is not None:
-        blocks.append((start, prev_end, _join_text(buf)))
+        blocks.append((start, prev_end, _join_text(buf), speaker))
     return blocks
+
 
 
 def write_markdown(url: str, info: dict, segments, tr_info,
@@ -1303,6 +1342,17 @@ def write_markdown(url: str, info: dict, segments, tr_info,
     blocks = group_paragraphs(segments)
     duration = tr_info.duration or info.get("duration") or 0
 
+    # 原始聚类编号是稀疏的（可能是 0 和 3），直接输出会变成 S1/S4 让人以为漏了人。
+    # 这里按【实际出现顺序】重排成连续的 0,1,2…，输出就是 S1/S2/S3。
+    present = []
+    for _s, _e, _t, _spk in blocks:
+        if _spk is not None and _spk not in present:
+            present.append(_spk)
+    speaker_map = {raw: idx for idx, raw in enumerate(present)}
+    blocks = [(s, e, tx, None if spk is None else speaker_map[spk])
+              for s, e, tx, spk in blocks]
+    speakers = list(speaker_map.values())
+
     lines = [
         f"# {info.get('title') or wav.stem}",
         "",
@@ -1313,13 +1363,18 @@ def write_markdown(url: str, info: dict, segments, tr_info,
         f"- **转写**：faster-whisper（{model_size}，VAD 开，beam=1）",
         f"- **生成时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- **字幕条数**：{len(segments)}，合并为 {len(blocks)} 段",
+        *([f"- **说话人**：{len(speakers)} 人（{', '.join(diarize.label(s) for s in speakers)}）"]
+          if speakers else []),
         "",
         "---",
         "",
     ]
 
-    for start, end, text in blocks:
-        lines.append(f"## {_fmt_clock(start)} ~ {_fmt_clock(end)}")
+    for start, end, text, speaker in blocks:
+        head = f"## {_fmt_clock(start)} ~ {_fmt_clock(end)}"
+        if speaker is not None:
+            head += f"  [{diarize.label(speaker)}]"
+        lines.append(head)
         lines.append("")
         lines.append(text)
         lines.append("")
@@ -1391,7 +1446,10 @@ def run(url: str, proxy_arg: str | None, no_proxy: bool,
         model: str, force: bool, out: Path | None,
         lang: str | None = None, resume: bool = True,
         cookies: Path | None = None, device_mode: str = "auto",
-        cookies_from_browser: str | None = None) -> int:
+        cookies_from_browser: str | None = None,
+        with_speakers: bool = False,
+        diarize_threshold: float = diarize.DEFAULT_THRESHOLD,
+        num_speakers: int = -1) -> int:
     rep = Report()
 
     # 先查硬依赖：ffmpeg 缺失时没必要先花时间下载
@@ -1427,7 +1485,11 @@ def run(url: str, proxy_arg: str | None, no_proxy: bool,
 
         # 4. 转写
         segments, tr_info, tr_sec = transcribe(
-            wav, model, lang, resume, device_mode=device_mode)
+            wav, model, lang, resume, device_mode=device_mode,
+            with_speakers=with_speakers,
+            diarize_threshold=diarize_threshold,
+            num_speakers=num_speakers,
+            proxy=proxy)
         rep.add("语音转写", tr_sec, f"{len(segments)} 条字幕")
         if not segments:
             raise PipelineError(
@@ -1488,6 +1550,14 @@ def main() -> int:
                              "tiny/base/small/medium/large-v3")
     parser.add_argument("--force", action="store_true",
                         help="忽略已下载/已提取的文件，全部重做")
+    parser.add_argument("--diarize", dest="speakers_enabled", action="store_true",
+                        help="开启说话人分离（需 pip install sherpa-onnx；"
+                             "首次下载 34MB 模型；总耗时大约翻倍）")
+    parser.add_argument("--num-speakers", type=int, default=-1, metavar="N",
+                        help="已知说话人数量时指定（如 2）；默认 -1 = 自动判断")
+    parser.add_argument("--diarize-threshold", type=float,
+                        default=diarize.DEFAULT_THRESHOLD, metavar="X",
+                        help="说话人聚类阈值：调大更倾向合并为同一人")
     parser.add_argument("-o", "--out", type=Path, help="输出 Markdown 路径")
     args = parser.parse_args()
 
@@ -1505,7 +1575,10 @@ def main() -> int:
                args.model, args.force, args.out, lang=args.lang,
                resume=not args.no_resume, cookies=args.cookies,
                device_mode=args.device,
-               cookies_from_browser=args.cookies_from_browser)
+               cookies_from_browser=args.cookies_from_browser,
+               with_speakers=args.speakers_enabled,
+               diarize_threshold=args.diarize_threshold,
+               num_speakers=args.num_speakers)
 
 
 if __name__ == "__main__":

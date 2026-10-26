@@ -31,7 +31,7 @@ jobs:
         shell: bash
         run: |
           set -e
-          files="app.py pipeline.py check_env.py make_icon.py tools/diag_open.py tools/check_links.py"
+          files="app.py pipeline.py check_env.py diarize.py make_icon.py tools/diag_open.py tools/check_links.py"
           for f in $files; do
             echo "::group::py_compile $f"
             python -m py_compile "$f"

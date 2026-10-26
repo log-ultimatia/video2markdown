@@ -242,6 +242,18 @@ class App:
         screen_h = self.root.winfo_screenheight()
         screen_w = self.root.winfo_screenwidth()
 
+        # 屏幕矮的时候，内容装不下，pack 会把最后 pack 的日志区压成一条缝。
+        # 日志是主要工作区，不能压；宁可先隐藏那行纯提示文字（--dnd_hint--）。
+        if need_h + 8 > screen_h - 100:
+            try:
+                if self.dnd_hint.winfo_manager():
+                    self.dnd_hint.pack_forget()
+                    self.root.update_idletasks()
+                    need_h = self.root.winfo_reqheight()
+                    print("[布局] 屏幕偏矮，已隐藏提示行以保证日志区可见")
+            except (AttributeError, tk.TclError):
+                pass
+
         # +8: 留一点余量，避免正好卡在临界值上触发一次收缩
         h = max(560, min(need_h + 8, screen_h - 100))
         w = max(900, min(max(need_w + 40, 980), screen_w - 120))
@@ -503,19 +515,32 @@ class App:
                        activebackground=C_CARD, selectcolor=C_CARD).pack(
             side="left", padx=(14, 0))
 
+
         drow = tk.Frame(card, bg=C_CARD)
         drow.pack(fill="x", padx=12, pady=(1, 3))
         tk.Label(drow, text="设备：", bg=C_CARD, fg=C_MUTED,
                  font=UI_FONT).pack(side="left")
         self.device_var = tk.StringVar(value="自动（推荐）")
         self.device_box = ttk.Combobox(
-            drow, textvariable=self.device_var, state="readonly", width=28,
+            drow, textvariable=self.device_var, state="readonly", width=16,
             values=[label for label, _ in DEVICE_CHOICES], font=UI_FONT)
         self.device_box.pack(side="left")
-        self.device_tip = tk.Label(drow, text="自动检测 CUDA，不可用时使用 CPU",
-                                   bg=C_CARD, fg=C_MUTED, font=UI_FONT_SM)
-        self.device_tip.pack(side="left", padx=(8, 0))
         self.device_box.bind("<<ComboboxSelected>>", self._on_device_change)
+
+        # 说话人分离：多人对话/访谈用。默认关 —— 它会让总耗时大约翻倍。
+        # 放在设备这一行，是为了不额外占一行把日志区压扁。
+        tk.Frame(drow, width=14, bg=C_CARD).pack(side="left")
+        self.speakers_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(drow, text="说话人分离", variable=self.speakers_var,
+                       bg=C_CARD, fg=C_MUTED, font=UI_FONT_SM,
+                       activebackground=C_CARD, selectcolor=C_CARD).pack(
+            side="left")
+        self.speaker_count_var = tk.StringVar(value="自动")
+        self.speaker_count_box = ttk.Combobox(
+            drow, textvariable=self.speaker_count_var, state="readonly",
+            width=6, values=["自动", "2 人", "3 人", "4 人", "5 人"],
+            font=UI_FONT)
+        self.speaker_count_box.pack(side="left", padx=(4, 0))
 
         self.dnd_hint = tk.Label(
             card, text="提示：直接粘贴 YouTube 链接即可；中英混排的视频请保持「自动检测/混合」",
@@ -903,6 +928,12 @@ class App:
                 return code
         return "chrome"
 
+    def _selected_speaker_count(self) -> int:
+        """把下拉框的"自动 / 3 人"翻成 -1 或具体人数。"""
+        txt = self.speaker_count_var.get().strip()
+        digits = "".join(ch for ch in txt if ch.isdigit())
+        return int(digits) if digits else -1
+
     def _build_cmd(self, source: str) -> list:
         cmd = [str(_python_exe()), "-u", str(PIPELINE), source,
                "--model", self.model_var.get()]
@@ -924,6 +955,11 @@ class App:
             cookies = self.cookie_var.get().strip()
             if cookies:
                 cmd += ["--cookies", cookies]
+        if self.speakers_var.get():
+            cmd.append("--diarize")
+            n = self._selected_speaker_count()
+            if n > 0:
+                cmd += ["--num-speakers", str(n)]
         return cmd
 
     def start(self) -> None:

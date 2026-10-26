@@ -63,6 +63,9 @@ python pipeline.py URL --proxy http://127.0.0.1:7890
 # Force a language instead of auto-detecting
 python pipeline.py URL --lang en
 
+# Speaker diarization (interviews / podcasts / multi-person)
+python pipeline.py URL --diarize --num-speakers 2
+
 # 选择推理设备：auto / cpu / cuda
 python pipeline.py URL --device cuda
 
@@ -115,6 +118,7 @@ Subtitle lines are merged into ~180-character paragraphs, because subtitles are 
 | Simplified Chinese + punctuation | ✅ prompt + OpenCC fallback |
 | Proxy support | ✅ CLI arg / env var / system default |
 | Model choice | tiny / base / small / medium / large-v3 |
+| **Speaker diarization** | ✅ optional, no PyTorch / no API token |
 
 ### Performance
 
@@ -187,6 +191,10 @@ python pipeline.py URL --device npu --model small
 
 # 忽略断点缓存，从头转写
 python pipeline.py URL --no-resume
+
+# 说话人分离（访谈 / 播客 / 多人讨论）
+python pipeline.py URL --diarize
+python pipeline.py URL --diarize --num-speakers 3
 
 # 登录/会员视频：传入导出的 Netscape HTTP Cookie File
 python pipeline.py URL --cookies D:\path\cookies.txt
@@ -261,6 +269,42 @@ Whisper 对中文默认输出繁体、而且经常整段不加标点。给它一
 | 给提示词 | **2.4s** | **0** | **11** |
 
 注意加了提示词**反而更快**。另外还有 OpenCC 的 `t2s` 作为兜底。
+
+### 说话人分离（可选）
+
+访谈、播客、多人讨论这类视频，一整段文字读下来分不清谁在说话。加 `--diarize` 后每段带说话人标签：
+
+```
+## 00:00:09 ~ 00:00:34  [S1]
+今天聊一下为什么买这台手机，用了一个月之后我的看法变了不少。
+
+## 00:01:02 ~ 00:01:19  [S2]
+And this helped grow the rest of the field in a way nobody expected.
+```
+
+**为什么不用 Buzz 那套 pyannote**：pyannote.audio 需要 PyTorch（CPU 版约 124MB，装完实际占 2GB 左右）
+和 HuggingFace token（`pyannote/speaker-diarization-3.1` 是 gated 模型，要去网页接受条款）。
+一个"本地、免费、不要 key"的工具带上这两个门槛，等于把大部分用户挡在门外。
+
+这里用 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)：纯 ONNX Runtime，
+包本体 2MB，模型 34MB（pyannote 分割 6.6MB + 3D-Speaker 中英双语说话人嵌入 27MB），
+**不需要 PyTorch、不需要 token**。
+
+实测（150 秒中英混排素材，真实情况是中文旁白 + 英文访谈 + 旁白）：
+
+| 聚类阈值 | 检测到人数 | 说明 |
+|---|---|---|
+| 0.5 ~ 0.7 | 6 | 过分裂，把一个人拆成好几个 |
+| 0.8 | 4 | |
+| **0.9（默认）** | **3** | ✅ 符合素材实际 |
+
+分离出的切换点也准：中文段结束在 60s、英文段结束在 105s，和真实切换点一致。
+
+**代价**：分离本身约 28 秒（150 秒音频，约 5.3x 实时），而转写也是 28 秒 ——
+**总耗时大约翻倍**。所以它默认关闭，只在多人对话时开。
+
+已知人数时指定 `--num-speakers 2` 比自动判断更准；阈值用 `--diarize-threshold` 调。
+
 
 ### 性能
 

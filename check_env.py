@@ -60,7 +60,6 @@ PACKAGES = {
     "yt_dlp": "yt-dlp",
     "faster_whisper": "faster-whisper",
     "socks": "PySocks",
-    "openvino_genai": "openvino-genai",
 }
 
 MIN_PYTHON = (3, 9)
@@ -335,6 +334,36 @@ def _dist_version(dist: str) -> str:
 # ---------------------------------------------------------------------------
 # 5. 目录骨架
 # ---------------------------------------------------------------------------
+def check_optional(rep: Report) -> None:
+    """
+    报告【可选】后端是否装了。
+
+    这些不是依赖：没装照样能跑 CPU/GPU 转写，只是对应功能不可用。
+    所以只做提示，不计入失败。
+    """
+    import importlib.util
+
+    rows = [
+        ("sherpa_onnx", "说话人分离 --diarize", "pip install sherpa-onnx"),
+        ("openvino_genai", "Intel NPU --device npu",
+         'pip install "openvino>=2026.4" "openvino-genai>=2026.4"'),
+        ("opencc", "繁体->简体兜底（提示词已足够，只是少一层保险）",
+         "pip install opencc-python-reimplemented"),
+    ]
+    print()
+    print("  [6/7] 可选能力")
+    for module, ability, how in rows:
+        try:
+            found = importlib.util.find_spec(module) is not None
+        except (ImportError, ValueError):
+            found = False
+        if found:
+            print(f"    [✓] {module:<15} 已装 —— {ability} 可用")
+        else:
+            print(f"    [·] {module:<15} 未装 —— {ability} 不可用")
+            print(f"        需要时装：{how}")
+
+
 def check_dirs(rep: Report) -> None:
     print("\n[5/6] 目录骨架")
     for name in SUBDIRS:
@@ -422,6 +451,7 @@ def main() -> int:
     else:
         proxy_open = check_proxy(rep, proxy)
     check_packages(rep)
+    check_optional(rep)
     check_dirs(rep)
 
     if args.no_net:
