@@ -1037,6 +1037,61 @@ def _save_ckpt(wav: Path, sig: str, segments: list) -> None:
         print(f"  [警告] 检查点保存失败：{exc}")
 
 
+# ---------------------------------------------------------------------------
+# 语言断点切分：让每一段"语言单一"
+# ---------------------------------------------------------------------------
+# 为什么必须做（真实现场）：
+#   某支视频 0~30 秒是中文片头 + 英文采访。整块检测语言 = zh（置信度 0.86），
+#   于是 Whisper 用中文模式去转英文音频 —— 它不会报错，而是【把英文翻译成中文】：
+#
+#     原文：What are we calling this big event...? Has the event got a name?
+#     输出：我们在最初的奖励中，我们在这一开始，我们在评测数十多个评论中，
+#           我们有没有一个名字？
+#
+#   这是最坏的失败方式：内容看着通顺，但已经不是原话，而且没法靠后处理修回来。
+#
+# 做法：检测置信度不够就把这一块对半切开，各自再检测，直到置信度够高或到达
+# 最小长度。切出来的每一段带着自己的语言 token 去转写，就不会互相污染。
+
+LANG_SPLIT_CONF = 0.90      # 置信度低于这个值就继续切
+LANG_SPLIT_MIN_SEC = 15.0   # 切到这么短就停（再短转写质量会下降）
+LANG_SPLIT_DEPTH = 3        # 60s -> 30s -> 15s，最多切三层
+
+
+def _language_split(model, audio, rate: int, ranges: list,
+                    conf: float = LANG_SPLIT_CONF,
+                    min_sec: float = LANG_SPLIT_MIN_SEC,
+                    max_depth: int = LANG_SPLIT_DEPTH) -> list:
+    """
+    把 ranges（样本区间）按语言断点切开，返回 [(起样本, 止样本, 语言或 None), ...]。
+
+    语言为 None 表示"切到最小仍然不确定"，交给 _run_once 自己检测。
+    """
+    out = []
+    min_n = int(min_sec * rate)
+
+    def rec(a: int, b: int, depth: int) -> None:
+        if b - a < rate * 2:                      # 短到没意义
+            return
+        seg = audio[a:b]
+        lang, prob = None, 0.0
+        try:
+            lang, prob, _ = model.detect_language(audio=seg)
+        except Exception:
+            out.append((a, b, None))
+            return
+        if prob >= conf or (b - a) <= min_n or depth >= max_depth:
+            out.append((a, b, lang if prob >= conf else None))
+            return
+        mid = a + (b - a) // 2
+        rec(a, mid, depth + 1)
+        rec(mid, b, depth + 1)
+
+    for s, e in ranges:
+        rec(int(s), int(e), 0)
+    return out
+
+
 def _chunk_ranges(audio, rate: int, chunk_sec: float) -> list:
     """
     把音频切成若干块，切口尽量落在静音处。
@@ -1158,6 +1213,7 @@ def transcribe(wav: Path, model_size: str = WHISPER_MODEL,
     remaining = audio[int(start_sec * rate):]
     ranges = [(s + int(start_sec * rate), e + int(start_sec * rate))
               for s, e in _chunk_ranges(remaining, rate, CHUNK_SEC)]
+
     n = len(ranges)
     print(f"  待转 {_fmt_duration(total_sec - start_sec)}，分 {n} 段处理"
           f"（每段约 {CHUNK_SEC // 60} 分钟，每 {CKPT_SAVE_EVERY} 条字幕存一次）")
@@ -1175,6 +1231,22 @@ def transcribe(wav: Path, model_size: str = WHISPER_MODEL,
 
     candidates = _device_candidates(device_mode)
     print(f"  设备模式：{device_mode}（候选：{', '.join(f'{d}/{t}' for d, t in candidates)}）")
+    # 语言断点切分：把"中英混在一块"的区间继续对半切开，让每段语言单一。
+    # 不这么做的话，一块里只要中文占多数，Whisper 就会把同一块里的英文
+    # 【翻译成中文】—— 实测过，内容看着通顺但已经不是原话。
+    pieces = [(s, e, None) for s, e in ranges]
+    if forced_lang is None:
+        try:
+            lang_model = _get_model(WhisperModel, model_size, *candidates[0])
+            pieces = _language_split(lang_model, audio, rate, ranges)
+            langs = [p[2] for p in pieces if p[2]]
+            if len(pieces) > len(ranges):
+                print(f"  语言断点：{len(ranges)} 块 -> {len(pieces)} 段"
+                      f"（检测到 {', '.join(sorted(set(langs))) or '不确定'}）")
+        except Exception as exc:
+            print(f"  [警告] 语言断点切分跳过：{type(exc).__name__}: {exc}")
+
+    n = len(pieces)
 
     chosen = None
     last_info = None
@@ -1205,7 +1277,7 @@ def transcribe(wav: Path, model_size: str = WHISPER_MODEL,
 
     started = time.time()
     for idx in range(n):
-        s, e = ranges[idx]
+        s, e, piece_lang = pieces[idx]
         print(f"  --- 第 {idx + 1}/{n} 段："
               f"{_fmt_duration(s / rate)} ~ {_fmt_duration(e / rate)}")
         tries = [chosen] if chosen else candidates
@@ -1214,7 +1286,7 @@ def transcribe(wav: Path, model_size: str = WHISPER_MODEL,
             try:
                 segs, info, used, last_lang = _run_once(
                     WhisperModel, model_size, device, ctype, audio[s:e],
-                    lang=forced_lang, prompt=None,
+                    lang=forced_lang or piece_lang, prompt=None,
                     base_offset=s / rate,
                     chunk_idx=idx, chunk_total=n,
                     on_segment=persist,
@@ -1246,6 +1318,20 @@ def transcribe(wav: Path, model_size: str = WHISPER_MODEL,
     saved.sort(key=lambda d: d["start"])
     all_segs = [Seg(d["start"], d["end"], d["text"], d.get("speaker")) for d in saved]
 
+    # 混排细分：把缺标点的中文段单独拎出来重转。
+    # 放在检查点【之后】做 —— 存档里存的是原始结果，每次运行都重新细分，
+    # 续跑和首次运行得到的结果一致。
+    if all_segs and not _NO_REFINE and WhisperModel is not None:
+        try:
+            refine_model = _get_model(WhisperModel, model_size,
+                                      *(chosen or ("cpu", "int8")))
+            before = len(all_segs)
+            all_segs = refine_language_runs(all_segs, audio, rate, refine_model)
+            if len(all_segs) != before:
+                print(f"       混排细分后共 {len(all_segs)} 条字幕")
+        except Exception as exc:
+            print(f"       [警告] 混排细分整体跳过：{type(exc).__name__}: {exc}")
+
     elapsed = time.time() - started
     audio_sec = total_sec or 0
     speed = (audio_sec / max(elapsed, 0.001))
@@ -1265,6 +1351,138 @@ def transcribe(wav: Path, model_size: str = WHISPER_MODEL,
         print(f"       本次从 {_fmt_duration(resume_at)} 处接着转，"
               f"省下前面 {_fmt_duration(resume_at)} 音频的转写时间")
     return all_segs, info, elapsed
+
+
+# ---------------------------------------------------------------------------
+# 混排细分：把"缺标点的中文段"单独重转
+# ---------------------------------------------------------------------------
+# 为什么需要（真实现场，一段中英混排视频的 60 秒块）：
+#   整块转 -> 这段陶哲宣的访谈是数学频道NumberDales在10月15号放出来的。上次我们
+#            检查是9月初他说数学家要的其实有两样答案和理解以前这两样是绑在一起的
+#   单独转 -> 这段陶哲轩的访谈是数学频道 Numberphile 在 10 月 15 号放出来的。
+#
+# 同一个模型、同一段音频，差别只在于"有没有和英文抢上下文"。
+# 混排块里模型会放弃断句，人名和数字也跟着错。
+#
+# 做法：转完之后扫一遍字幕，把【中文占多数、且几乎没有标点】的连续片段
+# 单独拎出来、按中文重新转一遍（带中文提示词）。
+
+REFINE_MIN_SEC = 2.5        # 短于这个长度的片段不值得重转
+REFINE_PAD = 0.4            # 前后各留 0.4 秒，避免把词切在边界上
+REFINE_MAX_RATIO = 0.5      # 需要重转的总时长超过音频一半就放弃，交给后处理
+_NO_REFINE = False          # 由 --no-refine 置为 True
+
+
+def _seg_text(seg) -> str:
+    return seg["text"] if isinstance(seg, dict) else (seg.text or "")
+
+
+def refine_language_runs(segs, audio, rate: int, model, verbose: bool = True):
+    """
+    把缺标点的中文连续片段单独重转，返回新的片段列表。
+
+    触发条件（同时满足）：
+      · 片段里中文占多数（_cjk_ratio >= 0.35）
+      · 连续长度 >= REFINE_MIN_SEC
+      · 标点密度 < 0.03（即每 30 多个字才 1 个标点，基本等于没断句）
+
+    不触发的情况一律原样保留：纯英文、已有标点的中文、很短的插话。
+    """
+    if not segs or model is None:
+        return segs
+
+    def ratio(s):
+        return _cjk_ratio(_seg_text(s))
+
+    def density(s):
+        return _punct_density(_seg_text(s))
+
+    total_audio = len(audio) / rate if rate else 0.0
+    budget = total_audio * REFINE_MAX_RATIO
+    used = 0.0
+    out, refined, skipped = [], 0, 0
+    i, n = 0, len(segs)
+
+    while i < n:
+        if ratio(segs[i]) < 0.35:
+            out.append(segs[i])
+            i += 1
+            continue
+
+        j = i
+        while j < n and ratio(segs[j]) >= 0.35:
+            j += 1
+        run = segs[i:j]
+        span = run[-1].end - run[0].start
+        text = "".join(_seg_text(s) for s in run)
+
+        trigger = (span >= REFINE_MIN_SEC
+                   and _punct_density(text) < 0.03
+                   and span <= max(budget - used, 0.0))
+        if trigger:
+            # 先确认这段【音频】真的是中文。否则可能是"英文被当中文转成了中文"，
+            # 那种情况下再按中文重转只会越走越偏。
+            try:
+                seg_lang, seg_prob, _ = model.detect_language(
+                    audio=audio[int(run[0].start * rate):int(run[-1].end * rate)])
+                if seg_lang != "zh":
+                    if verbose:
+                        print(f"       [混排细分] {_fmt_clock(run[0].start)} 起这段"
+                              f"音频其实是 {seg_lang}（{seg_prob:.2f}），跳过细分")
+                    trigger = False
+            except Exception:
+                pass
+        if not trigger:
+            if span >= REFINE_MIN_SEC and _punct_density(text) < 0.03:
+                skipped += 1
+            out.extend(run)
+            i = j
+            continue
+
+        start = max(0.0, run[0].start - REFINE_PAD)
+        end = min(total_audio, run[-1].end + REFINE_PAD)
+        try:
+            got, _info = model.transcribe(
+                audio[int(start * rate):int(end * rate)],
+                language="zh",
+                initial_prompt=prompt_for("zh"),
+                beam_size=1,
+                vad_filter=True,
+                vad_parameters={"min_silence_duration_ms": 500},
+                no_repeat_ngram_size=3,
+                hallucination_silence_threshold=2.0,
+            )
+            fresh = []
+            for s in got:
+                txt = (s.text or "").strip()
+                if not txt:
+                    continue
+                fresh.append(Seg(round(start + s.start, 3), round(start + s.end, 3), txt,
+                                 getattr(run[0], "speaker", None)))
+            if not fresh:                       # 重转没结果就别乱改
+                out.extend(run)
+                i = j
+                continue
+            used += span
+            refined += 1
+            if verbose:
+                before = _punct_density(text)
+                after = _punct_density("".join(s.text for s in fresh))
+                print(f"       [混排细分] {_fmt_clock(start)}~{_fmt_clock(end)} "
+                      f"中文段重转：{len(run)} 条 -> {len(fresh)} 条，"
+                      f"标点密度 {before:.3f} -> {after:.3f}")
+            out.extend(fresh)
+        except Exception as exc:
+            if verbose:
+                print(f"       [警告] 混排细分失败（保留原结果）："
+                      f"{type(exc).__name__}: {exc}")
+            out.extend(run)
+        i = j
+
+    if verbose and skipped:
+        print(f"       [混排细分] 另有 {skipped} 段达到触发条件但超出预算，"
+              f"交给后面标点恢复处理")
+    return out
 
 
 def _explain_model_error(exc: Exception) -> str:
@@ -1496,6 +1714,11 @@ def polish_text(text: str, fix_punct: bool = True, proxy: str | None = None) -> 
     text = _space_cjk_latin(text)
     if cjk_ratio >= 0.20:
         text = _fullwidth_punct(text)
+    # 反向修正：紧跟在拉丁字母/数字后面的全角标点改回半角。
+    # 标点模型看不到"语言边界"，会把英文分句也断成全角，例如
+    # "we asked。" -> 应该是 "we asked."
+    for full, half in {v: k for k, v in _HALF_TO_FULL.items()}.items():
+        text = re.sub(rf"([A-Za-z0-9]){re.escape(full)}", lambda m, h=half: m.group(1) + h, text)
     return text
 
 
@@ -1738,11 +1961,16 @@ def main() -> int:
     parser.add_argument("--diarize-threshold", type=float,
                         default=diarize.DEFAULT_THRESHOLD, metavar="X",
                         help="说话人聚类阈值：调大更倾向合并为同一人")
+    parser.add_argument("--no-refine", action="store_true",
+                        help="不做混排细分（默认会做：把缺标点的中文段单独重转）")
     parser.add_argument("--no-fix-punctuation", dest="fix_punct",
                         action="store_false",
                         help="不做中文标点恢复（默认会做：中文缺标点时自动下载 62MB 模型补标点）")
     parser.add_argument("-o", "--out", type=Path, help="输出 Markdown 路径")
     args = parser.parse_args()
+    if getattr(args, "no_refine", False):
+        global _NO_REFINE
+        _NO_REFINE = True
 
     try:
         sys.stdout.reconfigure(encoding="utf-8")
