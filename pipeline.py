@@ -110,6 +110,17 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
+# CUDA 上的计算精度。
+#
+# 为什么不用最"标准"的 float16：在这台机器（RTX 4070 Laptop）上实测，
+# float16 会让模型输出崩掉 —— 同一支中英混排视频：
+#     float16        英文词 154，中文字 1152，繁体 350   <- 把英文翻成中文还带繁体
+#     int8_float16   英文词 765，中文字 263，繁体 38     <- 正常
+#     int8           英文词 77， 中文字 245，繁体 75     <- 正常
+# 症状很像"语言判定被数值误差带偏"。int8 权重 + float16 计算是 CTranslate2 在
+# GPU 上最稳的组合，速度与纯 float16 基本一样，所以默认用 int8_float16。
+CUDA_COMPUTE_TYPE = "int8_float16"
 _CUDA_DLL_DIR_HANDLES = []
 
 # ---------------------------------------------------------------------------
@@ -735,8 +746,8 @@ def _device_candidates(mode: str) -> list[tuple[str, str]]:
                 "   请确认当前 Python 环境已安装 nvidia-cublas-cu12 和 "
                 "nvidia-cudnn-cu12，并更新 NVIDIA 显卡驱动。\n"
                 "   或改选“自动”，让程序使用 CPU。")
-        return [("cuda", "float16")]
-    candidates = [("cuda", "float16"), ("cpu", "int8")]
+        return [("cuda", CUDA_COMPUTE_TYPE)]
+    candidates = [("cuda", CUDA_COMPUTE_TYPE), ("cpu", "int8")]
     if not _cuda_libs_present():
         candidates = [("cpu", "int8")]
         print("  未检测到 CUDA 运行库（cublas64_12.dll），自动使用 CPU")
@@ -832,6 +843,13 @@ def _cpu_threads() -> int:
 
 def _get_model(model_cls, model_size: str, device: str, compute_type: str):
     key = (model_size, device, compute_type)
+    # 用 CUDA 时必须先调用一次 _cuda_libs_present()：它不只是"检测"，
+    # 还会把 pip 装到 site-packages/nvidia/*/bin 的目录注册进 DLL 搜索路径。
+    # 少了这一步，模型能加载但第一次推理就报
+    # "Library cublas64_12.dll is not found or cannot be loaded"。
+    if device == "cuda":
+        _cuda_libs_present()
+
     if key not in _MODEL_CACHE:
         _MODEL_CACHE[key] = model_cls(
             model_size, device=device, compute_type=compute_type,
