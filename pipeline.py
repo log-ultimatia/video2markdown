@@ -1134,6 +1134,9 @@ def transcribe(wav: Path, model_size: str = WHISPER_MODEL,
             raise PipelineError(f"说话人分离失败：\n{exc}") from exc
         print(f"  [OK] 检测到 {spk_count} 个说话人（{len(spans)} 段），"
               f"分离耗时 {spk_sec:.1f}s")
+        if num_speakers <= 0:
+            print("       注意：人数是自动估算的，偏多的可能性较大。"
+                  "已知人数时用 --num-speakers N 会准确得多。")
 
     diarize_sig = (f"spk{num_speakers}@{diarize_threshold}" if with_speakers else "spkoff")
     sig = _ckpt_signature(wav, model_size, lang, device_mode, diarize_sig)
@@ -1353,6 +1356,15 @@ def write_markdown(url: str, info: dict, segments, tr_info,
               for s, e, tx, spk in blocks]
     speakers = list(speaker_map.values())
 
+    # 各说话人占了多少时长。自动判定的人数并不可靠（实测 8 个用例只对 5 个），
+    # 把占比写进头部，用户一眼就能看出"63% / 30% / 6%"这种可疑分布，
+    # 从而知道该用 --num-speakers 指定人数。
+    share: dict[int, float] = {}
+    for _s, _e, _t, _spk in blocks:
+        if _spk is not None:
+            share[_spk] = share.get(_spk, 0.0) + (_e - _s)
+    share_total = sum(share.values()) or 1.0
+
     lines = [
         f"# {info.get('title') or wav.stem}",
         "",
@@ -1363,7 +1375,8 @@ def write_markdown(url: str, info: dict, segments, tr_info,
         f"- **转写**：faster-whisper（{model_size}，VAD 开，beam=1）",
         f"- **生成时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- **字幕条数**：{len(segments)}，合并为 {len(blocks)} 段",
-        *([f"- **说话人**：{len(speakers)} 人（{', '.join(diarize.label(s) for s in speakers)}）"]
+        *([f"- **说话人**：{len(speakers)} 人"
+           f"（{', '.join(f'{diarize.label(s)} {share.get(s, 0) / share_total * 100:.0f}%' for s in speakers)}）"]
           if speakers else []),
         "",
         "---",

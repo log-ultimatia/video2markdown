@@ -535,10 +535,10 @@ class App:
                        bg=C_CARD, fg=C_MUTED, font=UI_FONT_SM,
                        activebackground=C_CARD, selectcolor=C_CARD).pack(
             side="left")
-        self.speaker_count_var = tk.StringVar(value="自动")
+        self.speaker_count_var = tk.StringVar(value="自动（估算）")
         self.speaker_count_box = ttk.Combobox(
             drow, textvariable=self.speaker_count_var, state="readonly",
-            width=6, values=["自动", "2 人", "3 人", "4 人", "5 人"],
+            width=6, values=["自动（估算）", "2 人", "3 人", "4 人", "5 人"],
             font=UI_FONT)
         self.speaker_count_box.pack(side="left", padx=(4, 0))
 
