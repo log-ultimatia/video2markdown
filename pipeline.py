@@ -817,11 +817,25 @@ def _get_npu_pipeline(model_size: str):
 _MODEL_CACHE: dict = {}
 
 
+def _cpu_threads() -> int:
+    """
+    CPU 推理线程数。faster-whisper 默认 0（=4 线程），这台机器有 20 个物理核，
+    明显吃不饱。取物理核数的 3/4 并封顶 16：再多收益递减，还会和 VAD/解码抢线程。
+    """
+    try:
+        import os as _os
+        n = _os.cpu_count() or 4
+        return max(4, min(16, int(n * 0.75)))
+    except Exception:
+        return 4
+
+
 def _get_model(model_cls, model_size: str, device: str, compute_type: str):
     key = (model_size, device, compute_type)
     if key not in _MODEL_CACHE:
         _MODEL_CACHE[key] = model_cls(
             model_size, device=device, compute_type=compute_type,
+            cpu_threads=_cpu_threads(),
             download_root=str(MODEL_DIR))
     return _MODEL_CACHE[key]
 
@@ -1053,43 +1067,71 @@ def _save_ckpt(wav: Path, sig: str, segments: list) -> None:
 # 做法：检测置信度不够就把这一块对半切开，各自再检测，直到置信度够高或到达
 # 最小长度。切出来的每一段带着自己的语言 token 去转写，就不会互相污染。
 
-LANG_SPLIT_CONF = 0.90      # 置信度低于这个值就继续切
-LANG_SPLIT_MIN_SEC = 15.0   # 切到这么短就停（再短转写质量会下降）
-LANG_SPLIT_DEPTH = 3        # 60s -> 30s -> 15s，最多切三层
+LANG_SPLIT_PIECE = 30.0     # 先固定切成这么长的小段再做语言检测
+LANG_SPLIT_MIN_SEC = 12.0   # 合并时短于这个值的孤立段不单独成段
 
 
 def _language_split(model, audio, rate: int, ranges: list,
-                    conf: float = LANG_SPLIT_CONF,
-                    min_sec: float = LANG_SPLIT_MIN_SEC,
-                    max_depth: int = LANG_SPLIT_DEPTH) -> list:
+                    piece_sec: float = LANG_SPLIT_PIECE,
+                    min_sec: float = LANG_SPLIT_MIN_SEC) -> list:
     """
-    把 ranges（样本区间）按语言断点切开，返回 [(起样本, 止样本, 语言或 None), ...]。
+    把 ranges 按语言切成"语言尽量单一"的小段，返回 [(起样本, 止样本, 语言或 None), ...]。
 
-    语言为 None 表示"切到最小仍然不确定"，交给 _run_once 自己检测。
+    ## 为什么先固定切、而不是"置信度不够才切"
+
+    最初靠置信度触发（<0.90 就切）。实测不可靠：
+      · 同一支视频，同一段混排音频 —— CPU(int8) 上置信度 0.86 会切；
+        GPU(float16) 上变成 0.91 就不切了
+      · 不切的那次，整块被当成中文转写，里面的英文被【翻译成中文】，
+        还伴随"很大的选择，很大的调查"这类复读
+
+    这种做法下，输出质量会随设备漂移 —— 这是不能接受的。
+    改成：每一块先固定切成 30 秒，逐段检测，再把相邻同语言的合并回去。
+    行为与设备无关，代价是每块多几次检测（GPU 上几乎感觉不到）。
+
+    ## 兜底
+
+    单段置信度仍然低（比如 30 秒里一半中文一半英文）时，语言给 None，
+    让 _run_once 自己去检测，行为和以前一致。
     """
-    out = []
+    out: list = []
+    conf_floor = 0.90
     min_n = int(min_sec * rate)
 
-    def rec(a: int, b: int, depth: int) -> None:
-        if b - a < rate * 2:                      # 短到没意义
-            return
-        seg = audio[a:b]
-        lang, prob = None, 0.0
-        try:
-            lang, prob, _ = model.detect_language(audio=seg)
-        except Exception:
-            out.append((a, b, None))
-            return
-        if prob >= conf or (b - a) <= min_n or depth >= max_depth:
-            out.append((a, b, lang if prob >= conf else None))
-            return
-        mid = a + (b - a) // 2
-        rec(a, mid, depth + 1)
-        rec(mid, b, depth + 1)
-
     for s, e in ranges:
-        rec(int(s), int(e), 0)
-    return out
+        s, e = int(s), int(e)
+        step = max(int(piece_sec * rate), rate)
+        cur = s
+        while cur < e:
+            nxt = min(cur + step, e)
+            if e - nxt < rate * 2:        # 尾巴太短就并进本段
+                nxt = e
+            lang = None
+            try:
+                got, prob, _ = model.detect_language(audio=audio[cur:nxt])
+                lang = got if prob >= conf_floor else None
+            except Exception:
+                lang = None
+            out.append([cur, nxt, lang])
+            cur = nxt
+
+    # 合并相邻同语言的小段（累计不超过一个原始块的长度太多即可）
+    merged: list = []
+    for seg in out:
+        if merged and merged[-1][2] is not None and merged[-1][2] == seg[2]:
+            merged[-1][1] = seg[1]
+        else:
+            merged.append(seg)
+
+    # 太短的孤段并到前一段，避免 3 秒一段导致转写质量下降
+    fixed: list = []
+    for seg in merged:
+        if fixed and (seg[1] - seg[0]) < min_n:
+            fixed[-1][1] = seg[1]
+        else:
+            fixed.append(seg)
+
+    return [(a, b, lang) for a, b, lang in fixed]
 
 
 def _chunk_ranges(audio, rate: int, chunk_sec: float) -> list:
