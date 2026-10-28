@@ -2,6 +2,7 @@
 
 | 文档 | 内容 |
 |---|---|
+| [VALIDATION_noise_and_diarization.md](VALIDATION_noise_and_diarization.md) | **验证报告** —— 噪声对识别的影响、降噪是否值得做、说话人分离的实测短板 |
 | [TECHNICAL_NOTES.md](TECHNICAL_NOTES.md) | **实现笔记** —— 设计取舍、关键参数理由、踩过的坑、全部实测数据 |
 | [LANDSCAPE.md](LANDSCAPE.md) | **同类方案调研** —— 开源项目（BiliNote / Buzz / whishper / Whisper-WebUI 等）与商业软件对比 |
 | [COMPARISON_buzz.md](COMPARISON_buzz.md) | 与 **Buzz** 的双语视频实测对比（含"为什么它会丢 75% 内容"） |

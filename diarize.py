@@ -47,6 +47,13 @@ from pathlib import Path
 # 实测同一段素材：0.5~0.7 会把 2~3 人拆成 6 人，0.8 -> 4 人，0.9 -> 3 人。
 DEFAULT_THRESHOLD = 0.9
 
+# 时长占比低于这个值的"说话人"会被合并到最近的说话人上。
+# 实测依据（双人播客 180 秒，自动检测给出 6 人）：
+#   S1 73.6%  S2 19.5%  S3 3.7%  S4 2.6%  S5 0.4%  S6 0.3%
+# 后四个加起来不到 7%，是噪声/串音聚出来的假人。按 5% 过滤后正好剩 2 人。
+# 阈值扫描救不了这个问题：0.90 -> 6 人，0.95 -> 5 人，0.99 仍是 4 人。
+MIN_SPEAKER_SHARE = 0.05
+
 SEGMENTATION_URL = (
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
     "speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2")
@@ -197,7 +204,58 @@ def run(audio, model_root: Path, threshold: float = DEFAULT_THRESHOLD,
 
     spans = [Span(float(s.start), float(s.end), int(s.speaker))
              for s in result.sort_by_start_time()]
-    return spans, int(result.num_speakers), elapsed
+
+    raw_count = int(result.num_speakers)
+    spans, speakers = prune_rare_speakers(spans)
+    if speakers != raw_count:
+        print(f"       （聚类给出 {raw_count} 人，"
+              f"已把占比 <{MIN_SPEAKER_SHARE:.0%} 的碎簇合并，实际 {speakers} 人）")
+    return spans, speakers, elapsed
+
+
+def prune_rare_speakers(spans: list[Span],
+                        min_share: float = MIN_SPEAKER_SHARE) -> tuple[list[Span], int]:
+    """
+    把"说话时长占比过低"的簇合并到时间上最近的说话人。
+
+    为什么需要：聚类会为噪声、串音、咳嗽、椅子响聚出独立的簇。实测一段
+    双人播客被聚成 6 个人，其中 4 个加起来占比不到 7%。调高阈值压不住
+    （0.99 仍有 4 个簇），因为这些簇的嵌入确实彼此不像 —— 它们本来就不是人。
+
+    合并而不是直接丢弃：丢掉会让那段时间的字幕没有说话人标签，
+    输出里出现无标签段落，看起来像坏了。归给最近的说话人是更合理的猜测。
+
+    返回 (清洗后的 spans, 清洗后的说话人数)。
+    """
+    if not spans:
+        return spans, 0
+
+    total = sum(s.end - s.start for s in spans)
+    if total <= 0:
+        return spans, 0
+
+    duration: dict[int, float] = {}
+    for s in spans:
+        duration[s.speaker] = duration.get(s.speaker, 0.0) + (s.end - s.start)
+
+    keep = {spk for spk, d in duration.items() if d / total >= min_share}
+    if not keep:                       # 全都很短，至少保留最大的那个
+        keep = {max(duration, key=duration.get)}
+    if len(keep) == len(duration):     # 没有需要合并的
+        return spans, len(keep)
+
+    kept = [s for s in spans if s.speaker in keep]
+    if not kept:
+        return spans, len(duration)
+
+    out: list[Span] = []
+    for s in spans:
+        if s.speaker in keep:
+            out.append(s)
+            continue
+        nearest = min(kept, key=lambda k: min(abs(k.start - s.start), abs(k.end - s.end)))
+        out.append(Span(s.start, s.end, nearest.speaker))
+    return out, len(keep)
 
 
 def best_speaker(spans: list[Span], start: float, end: float) -> int | None:
