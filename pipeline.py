@@ -1670,6 +1670,24 @@ def _cjk_ratio(text: str) -> float:
     return sum(1 for c in chars if _CJK_RE.match(c)) / len(chars)
 
 
+def _strip_cn_punct(text: str) -> str:
+    """去掉中文标点，给标点恢复模型一个干净的输入。"""
+    return re.sub(r"[，。！？、；：""''（）《》]", "", text)
+
+
+def _dedupe_punct(text: str) -> str:
+    """
+    清理重复标点。三种情况：
+      · 同一个标点连着出现   "，，" -> "，"
+      · 句子结束符后面又跟逗号 "。，" -> "。"
+      · 空标点串           "，，，" -> "，"
+    标点模型偶尔还会留下这种痕迹，兜一道。
+    """
+    text = re.sub(r"([，。！？、；：])\1+", r"\1", text)
+    text = re.sub(r"[。！？][，、；：]+", lambda m: m.group(0)[0], text)
+    return text
+
+
 def _punct_density(text: str) -> float:
     """每个中文字摊到几个中文标点。正常中文书面语大约 0.06~0.10。"""
     cjk = len(_CJK_RE.findall(text))
@@ -1786,7 +1804,12 @@ def polish_text(text: str, fix_punct: bool = True, proxy: str | None = None) -> 
         return text
     cjk_ratio = _cjk_ratio(text)
     if cjk_ratio >= 0.35 and fix_punct and _punct_density(text) < 0.03:
-        text = _restore_punctuation(text, proxy)
+        # CT-Transformer 是"给【没有标点】的文本补标点"的模型。
+        # 直接喂带标点的文本，它会在原标点旁边再加一个，叠出
+        #   "变得多了。，"   "看得懂。，"   "敌人？，"   "，，"
+        # 这类重复 —— 实测真实输出里成片出现，可读性反而更差。
+        # 正确用法：先把标点剥干净，让它整体重打一遍。
+        text = _restore_punctuation(_strip_cn_punct(text), proxy)
     text = _space_cjk_latin(text)
     if cjk_ratio >= 0.20:
         text = _fullwidth_punct(text)
@@ -1795,7 +1818,7 @@ def polish_text(text: str, fix_punct: bool = True, proxy: str | None = None) -> 
     # "we asked。" -> 应该是 "we asked."
     for full, half in {v: k for k, v in _HALF_TO_FULL.items()}.items():
         text = re.sub(rf"([A-Za-z0-9]){re.escape(full)}", lambda m, h=half: m.group(1) + h, text)
-    return text
+    return _dedupe_punct(text)
 
 
 def write_markdown(url: str, info: dict, segments, tr_info,
