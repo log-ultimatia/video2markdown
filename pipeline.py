@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -1336,9 +1337,173 @@ def group_paragraphs(segments, max_chars: int = PARAGRAPH_CHARS,
 
 
 
+
+# ---------------------------------------------------------------------------
+# 文本后处理：中文标点、中英间距
+# ---------------------------------------------------------------------------
+# 问题现场（真实输出，一段中英混排视频）：
+#   ## 00:00:24 ~ 00:00:37
+#   这段陶哲宣的访谈是数学频道Numberphile在10月15号放出来的。上次我们检查是9月初
+#   他说数学家要的其实有两样答案和理解以前这两样是绑在一起的这次答案先到了
+#
+# 三个毛病：
+#   1. 140 个中文字里只有 1 个标点 —— 读起来是一整块，断不开
+#   2. 中英文直接贴着：`数学频道Numberphile在10月15号`
+#   3. 把同一段音频【单独】拿出来转，标点就有了（4 个），连人名都从
+#      "陶哲宣"修回"陶哲轩" —— 说明问题出在"整块混排"，不是提示词
+#
+# 修法分两层：
+#   · 纯文本层（总是生效，无依赖）：中英之间补空格、中文语境的半角标点转全角
+#   · 模型层（可选，首次用会下 62MB）：CT-Transformer 标点恢复，补出 `，。？`
+
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+_CJK_RANGE = "\u4e00-\u9fff"
+_CN_PUNCT = "，。！？、；：""''（）《》"
+# 只在【紧邻中文】时才转全角，否则会破坏英文句子（实测模型会把
+# "papers, and they vary" 变成 "papers，and they vary"）
+_HALF_TO_FULL = {",": "，", ".": "。", "?": "？", "!": "！", ";": "；",
+                 ":": "：", "(": "（", ")": "）"}
+
+_PUNCT_MODEL_CACHE = None
+_PUNCT_MODEL_FIXED = False
+
+
+def _cjk_ratio(text: str) -> float:
+    """中文字占"有意义的字符"的比例。空白和标点不算。"""
+    chars = [c for c in text if not c.isspace() and c not in _CN_PUNCT and c not in ",.!?;:()"]
+    if not chars:
+        return 0.0
+    return sum(1 for c in chars if _CJK_RE.match(c)) / len(chars)
+
+
+def _punct_density(text: str) -> float:
+    """每个中文字摊到几个中文标点。正常中文书面语大约 0.06~0.10。"""
+    cjk = len(_CJK_RE.findall(text))
+    if cjk == 0:
+        return 1.0
+    return sum(1 for c in text if c in _CN_PUNCT) / cjk
+
+
+def _space_cjk_latin(text: str) -> str:
+    """中英文之间补空格：`数学频道Numberphile在10月15号` -> `数学频道 Numberphile 在 10 月 15 号`。"""
+    text = re.sub(rf"([{_CJK_RANGE}])([A-Za-z0-9])", r"\1 \2", text)
+    text = re.sub(rf"([A-Za-z0-9])([{_CJK_RANGE}])", r"\1 \2", text)
+    return text
+
+
+def _fullwidth_punct(text: str) -> str:
+    """中文语境里的半角标点转全角。只处理紧邻中文的，英文句子保持原样。"""
+    for half, full in _HALF_TO_FULL.items():
+        h = re.escape(half)
+        text = re.sub(rf"([{_CJK_RANGE}]){h}", lambda m: m.group(1) + full, text)
+        text = re.sub(rf"{h}([{_CJK_RANGE}])", lambda m: full + m.group(1), text)
+        # 中文标点后面紧跟的中文，前面的半角也要换
+        text = re.sub(rf"([{_CJK_RANGE}]{h})\s*([{_CJK_RANGE}])",
+                      lambda m: m.group(1).replace(half, full) + m.group(2), text)
+    return text
+
+
+def _restore_punctuation(text: str, proxy: str | None = None) -> str:
+    """
+    给缺少标点的中文补标点。用 sherpa-onnx 的 CT-Transformer（中英双语 int8，62MB）。
+
+    为什么不是无脑调用：
+      实测它对英文是破坏性的 —— 会把 `papers, and they vary` 改成
+      `papers，and they vary`。所以调用方必须先判断"这段是不是中文、是不是真的没标点"。
+
+    模型没装 / 下载失败时安静跳过，不影响主流程。
+    """
+    global _PUNCT_MODEL_CACHE, _PUNCT_MODEL_FIXED
+    if _PUNCT_MODEL_FIXED:
+        return text
+    try:
+        import sherpa_onnx
+    except ImportError:
+        _PUNCT_MODEL_FIXED = True        # 没装 sherpa-onnx，以后不再尝试
+        return text
+
+    try:
+        if _PUNCT_MODEL_CACHE is None:
+            model = _ensure_punct_model(proxy)
+            if model is None:
+                _PUNCT_MODEL_FIXED = True
+                return text
+            cfg = sherpa_onnx.OfflinePunctuationConfig(
+                model=sherpa_onnx.OfflinePunctuationModelConfig(
+                    ct_transformer=str(model)))
+            _PUNCT_MODEL_CACHE = sherpa_onnx.OfflinePunctuation(cfg)
+        return _PUNCT_MODEL_CACHE.add_punctuation(text)
+    except Exception as exc:
+        print(f"       [警告] 标点恢复失败，跳过：{type(exc).__name__}: {exc}")
+        _PUNCT_MODEL_FIXED = True
+        return text
+
+
+def _ensure_punct_model(proxy: str | None = None) -> Path | None:
+    """标点模型不存在就下载（62MB）。失败返回 None，不抛异常。"""
+    root = MODEL_DIR / "punct"
+    found = list(root.glob("*/model.int8.onnx")) if root.exists() else []
+    if found:
+        return found[0]
+
+    url = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/punctuation-models/"
+           "sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8.tar.bz2")
+    print("       这段中文缺少标点，正在下载标点恢复模型（62MB，只需一次）…")
+    try:
+        import tarfile
+        import urllib.request
+        root.mkdir(parents=True, exist_ok=True)
+        tar_path = root / "punct.tar.bz2"
+        handlers = []
+        if proxy:
+            handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+        opener = urllib.request.build_opener(*handlers)
+        with opener.open(url, timeout=180) as resp, open(tar_path, "wb") as fh:
+            while True:
+                block = resp.read(1024 * 256)
+                if not block:
+                    break
+                fh.write(block)
+        with tarfile.open(tar_path, "r:bz2") as tf:
+            try:
+                tf.extractall(root, filter="data")
+            except TypeError:
+                tf.extractall(root)
+        tar_path.unlink(missing_ok=True)
+        found = list(root.glob("*/model.int8.onnx"))
+        if found:
+            print(f"       [OK] 标点模型就绪：{found[0].parent.name}")
+            return found[0]
+    except Exception as exc:
+        print(f"       [警告] 标点模型下载失败，中文标点可能仍有缺失："
+              f"{type(exc).__name__}: {exc}")
+    return None
+
+
+def polish_text(text: str, fix_punct: bool = True, proxy: str | None = None) -> str:
+    """
+    收尾打磨一段文字。顺序很重要：
+
+      1. 先补标点（模型需要"没有标点"的输入才好判断该加在哪）
+      2. 再补中英空格
+      3. 最后统一全角/半角
+    """
+    if not text:
+        return text
+    cjk_ratio = _cjk_ratio(text)
+    if cjk_ratio >= 0.35 and fix_punct and _punct_density(text) < 0.03:
+        text = _restore_punctuation(text, proxy)
+    text = _space_cjk_latin(text)
+    if cjk_ratio >= 0.20:
+        text = _fullwidth_punct(text)
+    return text
+
+
 def write_markdown(url: str, info: dict, segments, tr_info,
                    wav: Path, out_path: Path,
-                   model_size: str = WHISPER_MODEL) -> Path:
+                   model_size: str = WHISPER_MODEL,
+                   fix_punct: bool = True,
+                   proxy: str | None = None) -> Path:
     """把转写结果写成 Markdown。"""
     banner("第 5 层 / 生成 Markdown")
 
@@ -1384,6 +1549,7 @@ def write_markdown(url: str, info: dict, segments, tr_info,
     ]
 
     for start, end, text, speaker in blocks:
+        text = polish_text(text, fix_punct=fix_punct, proxy=proxy)
         head = f"## {_fmt_clock(start)} ~ {_fmt_clock(end)}"
         if speaker is not None:
             head += f"  [{diarize.label(speaker)}]"
@@ -1462,7 +1628,8 @@ def run(url: str, proxy_arg: str | None, no_proxy: bool,
         cookies_from_browser: str | None = None,
         with_speakers: bool = False,
         diarize_threshold: float = diarize.DEFAULT_THRESHOLD,
-        num_speakers: int = -1) -> int:
+        num_speakers: int = -1,
+        fix_punct: bool = True) -> int:
     rep = Report()
 
     # 先查硬依赖：ffmpeg 缺失时没必要先花时间下载
@@ -1515,7 +1682,7 @@ def run(url: str, proxy_arg: str | None, no_proxy: bool,
         base = out or (OUTPUT_DIR / f"{wav.stem}.md")
         target = _target_for_source(base, wav, force)
         md = write_markdown(url, info, segments, tr_info, wav, target,
-                        model_size=model)
+                        model_size=model, fix_punct=fix_punct, proxy=proxy)
         rep.add("生成 Markdown", time.time() - t0, md.name)
 
     except PipelineError as exc:
@@ -1571,6 +1738,9 @@ def main() -> int:
     parser.add_argument("--diarize-threshold", type=float,
                         default=diarize.DEFAULT_THRESHOLD, metavar="X",
                         help="说话人聚类阈值：调大更倾向合并为同一人")
+    parser.add_argument("--no-fix-punctuation", dest="fix_punct",
+                        action="store_false",
+                        help="不做中文标点恢复（默认会做：中文缺标点时自动下载 62MB 模型补标点）")
     parser.add_argument("-o", "--out", type=Path, help="输出 Markdown 路径")
     args = parser.parse_args()
 
@@ -1591,7 +1761,8 @@ def main() -> int:
                cookies_from_browser=args.cookies_from_browser,
                with_speakers=args.speakers_enabled,
                diarize_threshold=args.diarize_threshold,
-               num_speakers=args.num_speakers)
+               num_speakers=args.num_speakers,
+               fix_punct=args.fix_punct)
 
 
 if __name__ == "__main__":

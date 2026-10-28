@@ -37,9 +37,11 @@ numpy>=1.26
 # openvino>=2026.4,<2027
 # openvino-genai>=2026.4,<2027
 
-# --- 说话人分离（可选后端，默认不装）---
-# 只有用 `--diarize` 才需要。约 2 MB，不需要 PyTorch。
-# 首次运行会自动下载 34MB 模型（分割 6.6MB + 说话人嵌入 27MB）。
+# --- 说话人分离 / 中文标点恢复（可选后端，默认不装）---
+# 装上之后：
+#   · `--diarize` 说话人分离（首次自动下载 34MB 模型）
+#   · 中文缺标点时自动补标点（首次自动下载 62MB 模型）
+# 约 2 MB，不需要 PyTorch、不需要 token。
 #     pip install sherpa-onnx
 # sherpa-onnx>=2.0
 
