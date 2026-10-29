@@ -1682,6 +1682,55 @@ def _cjk_ratio(text: str) -> float:
     return sum(1 for c in chars if _CJK_RE.match(c)) / len(chars)
 
 
+def _normalize_compat(text: str) -> str:
+    """
+    把「兼容形式」标点归一成标准字符。
+
+    为什么需要：CT-Transformer 补标点时，输出的不是 `，。？！`，
+    而是 U+FE50~FE6F 这些兼容形式（﹑ ﹐ ﹔ ﹒ ﹗ ﹖ ﹕ ﹞ ﹝ ﹛ ﹘）。
+    它们看着像标点，但：
+
+      · 我的去重/全角转换规则匹配的是 `[，。！？、；：]` —— 一个都匹配不上
+      · Markdown 渲染、搜索、复制到别处都会出问题
+      · 用户看到的就是"标点很怪、可读性差"
+
+    NFKC 归一正好把这类兼容字符折回标准形式（﹑->、 ﹐->, ﹒->. ﹗->!）。
+    折成半角之后再交给 _fullwidth_punct 统一转全角。
+    """
+    import unicodedata
+    return unicodedata.normalize("NFKC", text)
+
+
+def _drop_duplicate_sentences(text: str, verbose: bool = True) -> str:
+    """
+    去掉与前面某句高度相似的整句（退化复读的另一种形态）。
+
+    相似度用 difflib（标准库），阈值 0.80：既能抓住"牺牲爱好/牺牲安全"这种
+    只差一两个字的重复，又不会误删正常并列句。
+    """
+    import difflib
+    parts = re.split(r"(?<=[。！？!?])", text)
+    kept: list[str] = []
+    dropped = 0
+    for part in parts:
+        norm = re.sub(r"\s+", "", part)
+        if len(norm) >= 8:
+            for prev in kept:
+                prev_norm = re.sub(r"\s+", "", prev)
+                if len(prev_norm) < 8:
+                    continue
+                if difflib.SequenceMatcher(None, prev_norm, norm).ratio() >= 0.80:
+                    dropped += 1
+                    break
+            else:
+                kept.append(part)
+        else:
+            kept.append(part)
+    if dropped and verbose:
+        print(f"       [反复读] 去掉 {dropped} 句与前文高度重复的整句")
+    return "".join(kept)
+
+
 def _strip_cn_punct(text: str) -> str:
     """去掉中文标点，给标点恢复模型一个干净的输入。"""
     return re.sub(r"[，。！？、；：""''（）《》]", "", text)
@@ -1745,7 +1794,16 @@ def collapse_loops(text: str, verbose: bool = True) -> str:
             best = (piece, positions)
 
     if best is None:
-        return text
+        # 前缀法没命中时，退化复读更常见的形态是【整句重复】——
+        # 实测："…另一件事 AI 公司算不算敌人…牺牲爱好。原影片连接在说明栏…"
+        #       紧接着又出现 "另一件是 AI 公司算不算敌人…牺牲安全。"
+        # 每次措辞略有不同，所以用相似度而不是完全相等来判。
+        return _drop_duplicate_sentences(text, verbose)
+
+    return _finish_loop_cut(text, best, verbose)
+
+
+def _finish_loop_cut(text: str, best, verbose: bool) -> str:
 
     piece, positions = best
     cut = positions[LOOP_PREFIX_MIN - 1]
@@ -1888,6 +1946,7 @@ def polish_text(text: str, fix_punct: bool = True, proxy: str | None = None) -> 
     """
     if not text:
         return text
+    text = _normalize_compat(text)
     cjk_ratio = _cjk_ratio(text)
     if cjk_ratio >= 0.35 and fix_punct and _punct_density(text) < 0.03:
         # CT-Transformer 是"给【没有标点】的文本补标点"的模型。
