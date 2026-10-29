@@ -1841,7 +1841,13 @@ def collapse_loops(text: str, verbose: bool = True) -> str:
 
 
 def _finish_loop_cut(text: str, best, verbose: bool) -> str:
+    """按"3 字串重复"的判定结果截断。
 
+    注意：boundaries 必须在这里定义。上次把 collapse_loops 拆成两个函数时
+    漏了这一步，导致每次有中文输出都在 write_markdown 崩掉：
+        NameError: name 'boundaries' is not defined
+    """
+    boundaries = set("。！？，、；：\n")
     piece, positions = best
     cut = positions[LOOP_PREFIX_MIN - 1]
     # 退到上一个分句边界，避免截出半句
@@ -2054,7 +2060,14 @@ def write_markdown(url: str, info: dict, segments, tr_info,
     ]
 
     for start, end, text, speaker in blocks:
-        text = polish_text(text, fix_punct=fix_punct, proxy=proxy)
+        # 后处理是"锦上添花"，绝不能因为它出错把整次转写白费。
+        # 之前 _finish_loop_cut 漏了 boundaries，就是在这一步崩的 ——
+        # 用户跑完 6 分钟音频（甚至几小时）才发现最后一步炸掉。
+        try:
+            text = polish_text(text, fix_punct=fix_punct, proxy=proxy)
+        except Exception as exc:
+            print(f"       [警告] 文本打磨跳过（保留原始转写）："
+                  f"{type(exc).__name__}: {exc}")
         head = f"## {_fmt_clock(start)} ~ {_fmt_clock(end)}"
         if speaker is not None:
             head += f"  [{diarize.label(speaker)}]"
