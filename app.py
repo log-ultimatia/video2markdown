@@ -542,6 +542,18 @@ class App:
             font=UI_FONT)
         self.speaker_count_box.pack(side="left", padx=(4, 0))
 
+        # 专有名词表（词表偏置）：填进提示词，提升人名/术语准确率。
+        vrow = tk.Frame(card, bg=C_CARD)
+        vrow.pack(fill="x", padx=12, pady=(1, 3))
+        tk.Label(vrow, text="专有名词：", bg=C_CARD, fg=C_MUTED,
+                 font=UI_FONT).pack(side="left")
+        self.vocab_var = tk.StringVar(value="")
+        self.vocab_entry = tk.Entry(vrow, textvariable=self.vocab_var, font=UI_FONT,
+                                   width=52, bg="white", fg=C_TEXT, relief="solid", bd=1)
+        self.vocab_entry.pack(side="left", ipady=4)
+        tk.Label(vrow, text="逗号分隔，如 陶哲轩,Numberphile", bg=C_CARD,
+                 fg=C_MUTED, font=UI_FONT_SM).pack(side="left", padx=(8, 0))
+
         self.dnd_hint = tk.Label(
             card, text="提示：直接粘贴 YouTube 链接即可；中英混排的视频请保持「自动检测/混合」",
             bg=C_CARD, fg=C_MUTED, font=UI_FONT_SM)
@@ -955,6 +967,9 @@ class App:
             cookies = self.cookie_var.get().strip()
             if cookies:
                 cmd += ["--cookies", cookies]
+        vocab = self.vocab_var.get().strip()
+        if vocab:
+            cmd += ["--vocab", vocab]
         if self.speakers_var.get():
             cmd.append("--diarize")
             n = self._selected_speaker_count()

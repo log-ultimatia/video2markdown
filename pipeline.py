@@ -1763,9 +1763,35 @@ def _drop_duplicate_sentences(text: str, verbose: bool = True) -> str:
             continue
         kept.append(part)
         kept_grams |= grams
-    if dropped and verbose:
-        print(f"       [反复读] 去掉 {dropped} 句与前面高度重复的整句")
-    return "".join(kept)
+    result = "".join(kept)
+
+    # 第二轮：从【尾部】逐句回删。
+    # 第一轮漏掉的是"重复片段被切成了几句"的情况，比如
+    #   …已经开始牺牲爱好。原影片连接在说明栏。有兴趣可以去听更多。
+    #   另一件是 AI 公司算不算敌人。            <- 只有 14 字，4-gram 重叠率约 0.7
+    # 达不到 0.80。但它在【尾部】，而退化复读几乎总是堆在末尾，
+    # 所以对尾部用更低的阈值 0.55 单独处理，不会误伤正文中段。
+    tail_dropped = 0
+    while True:
+        parts = re.split(r"(?<=[。！？!?])", result)
+        parts = [x for x in parts if x.strip()]
+        if len(parts) < 3:
+            break
+        last = re.sub(r"\s+", "", parts[-1])
+        if len(last) < 6:
+            break
+        head_grams = _ngrams(re.sub(r"\s+", "", "".join(parts[:-1])))
+        last_grams = _ngrams(last)
+        if not last_grams:
+            break
+        if len(last_grams & head_grams) / len(last_grams) < 0.55:
+            break
+        result = "".join(parts[:-1])
+        tail_dropped += 1
+
+    if (dropped or tail_dropped) and verbose:
+        print(f"       [反复读] 去掉 {dropped} 句重复整句、{tail_dropped} 句尾部残句")
+    return result
 
 
 def _strip_cn_punct(text: str) -> str:
