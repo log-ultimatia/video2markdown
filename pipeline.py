@@ -121,6 +121,13 @@ CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 # 症状很像"语言判定被数值误差带偏"。int8 权重 + float16 计算是 CTranslate2 在
 # GPU 上最稳的组合，速度与纯 float16 基本一样，所以默认用 int8_float16。
 CUDA_COMPUTE_TYPE = "int8_float16"
+
+# 是否把上一段转写结果作为下一段的上下文。
+#
+# True（faster-whisper 默认）：上下文连续，但会把复读当上下文继续滚，
+#   出现"原影片在 20 分钟…原影片在 20 秒钟…"这种越来越偏的循环。
+# False：每段独立解码，复读不容易传染，但对繁体和断句的约束更弱。
+CONDITION_ON_PREV = False
 _CUDA_DLL_DIR_HANDLES = []
 
 # ---------------------------------------------------------------------------
@@ -966,7 +973,11 @@ def _run_once(model_cls, model_size: str, device: str, compute_type: str,
         vad_filter=True,
         vad_parameters={"min_silence_duration_ms": 500},
         # --- 反"捏造/复读"三件套 ---
-        # no_repeat_ngram_size：禁止同一个 3-gram 反复出现，专治复读循环
+        # condition_on_previous_text：默认 True —— 缺点是会把上一段的复读当上下文继续滚下去。
+# 曾经测试过关掉它会加重繁体和丢句，但那是【加入中文提示词和 OpenCC 之前】的结论。
+# 现在两层兜底都在，重新权衡（见 CONDITION_ON_PREV）。
+#
+# no_repeat_ngram_size：禁止同一个 3-gram 反复出现，专治复读循环
         # hallucination_silence_threshold：静音超过 2 秒时丢弃该段"幻听产物"
         #   （长视频里没人说话的段落，模型会凭空编内容，这是最常见的捏造来源）
         # condition_on_previous_text 保持 True：实测关掉反而让繁体和丢句变严重
@@ -1527,6 +1538,7 @@ def refine_language_runs(segs, audio, rate: int, model, verbose: bool = True):
                 vad_parameters={"min_silence_duration_ms": 500},
                 no_repeat_ngram_size=3,
                 hallucination_silence_threshold=2.0,
+                condition_on_previous_text=CONDITION_ON_PREV,
             )
             fresh = []
             for s in got:
@@ -1675,6 +1687,80 @@ def _strip_cn_punct(text: str) -> str:
     return re.sub(r"[，。！？、；：""''（）《》]", "", text)
 
 
+# ---------------------------------------------------------------------------
+# 复读截断
+# ---------------------------------------------------------------------------
+# 真实现场（medium 模型，某支视频最后一段）：
+#
+#   原影片将近 20 分钟…原影片是在 20 分…原影片在 20 秒钟…原影片，在 20 时…
+#   原影片的时间，在 30 分钟…原影片中，我还是在想？…
+#
+# 这是 Whisper 的退化解码：每句话都换了说法，所以 no_repeat_ngram_size=3
+# 抓不住（它只禁完全相同的 3-gram）；condition_on_previous_text 开/关实测
+# 对这段输出【一字不差】；单独把这 26 秒拿出来转则完全正常 —— 说明复读是
+# 上下文/分块引入的，模型本身的参数压不住。
+#
+# 能做的是在文本层兜一道：同一个短串在【句子/分句开头】反复出现，就是退化信号。
+
+LOOP_PREFIX_MIN = 3        # 至少重复 3 次才判定
+LOOP_PREFIX_LEN = 3        # 短串长度（中文 3 字，如"原影片"）
+LOOP_MAX_CJK = 600         # 只对"短块 + 高重复"动手，长的正常文本不碰
+
+
+def collapse_loops(text: str, verbose: bool = True) -> str:
+    """
+    把退化复读的尾巴截掉，只保留第一次重复之前的内容。
+
+    判定条件（同时满足才动手）：
+      · 中文字数 <= LOOP_MAX_CJK（长文本正常重复更多，不能误伤）
+      · 某个 3 字串在【开头或标点之后】出现 >= LOOP_PREFIX_MIN 次
+      · 该串至少占句子开头总数的 1/3（说明整段都在复读它，而不是偶尔提到）
+
+    宁可少删：触发时只截到第 3 次出现的分句之前，不重写内容。
+    """
+    cjk = len(re.findall(r"[\u4e00-\u9fff]", text))
+    if cjk < 20 or cjk > LOOP_MAX_CJK:
+        return text
+
+    boundaries = set("。！？，、；：\n")
+    best = None
+    counts: dict[str, list[int]] = {}
+    for i in range(len(text) - LOOP_PREFIX_LEN + 1):
+        piece = text[i:i + LOOP_PREFIX_LEN]
+        if not re.fullmatch(r"[\u4e00-\u9fff]{%d}" % LOOP_PREFIX_LEN, piece):
+            continue
+        if i > 0 and text[i - 1] not in boundaries:
+            continue                      # 只统计"分句开头"的出现
+        counts.setdefault(piece, []).append(i)
+
+    for piece, positions in counts.items():
+        if len(positions) < LOOP_PREFIX_MIN:
+            continue
+        # 关键判据：重复要【一直持续到文本后半段】才算退化。
+        # 正常文本提到同一个人名两三次，通常集中在前半（介绍完之后就不再说），
+        # 而退化复读会一路重复到最后。
+        if positions[-1] < len(text) * 0.5:
+            continue
+        if best is None or len(positions) > len(best[1]):
+            best = (piece, positions)
+
+    if best is None:
+        return text
+
+    piece, positions = best
+    cut = positions[LOOP_PREFIX_MIN - 1]
+    # 退到上一个分句边界，避免截出半句
+    while cut > 0 and text[cut - 1] not in boundaries:
+        cut -= 1
+    head = text[:cut].rstrip("，、；： ")
+    if len(head) < 10:
+        return text
+    if verbose:
+        print(f"       [反复读] 检测到「{piece}」在分句开头重复 {len(positions)} 次，"
+              f"已截断最后 {len(text) - len(head)} 字")
+    return head
+
+
 def _dedupe_punct(text: str) -> str:
     """
     清理重复标点。三种情况：
@@ -1818,7 +1904,8 @@ def polish_text(text: str, fix_punct: bool = True, proxy: str | None = None) -> 
     # "we asked。" -> 应该是 "we asked."
     for full, half in {v: k for k, v in _HALF_TO_FULL.items()}.items():
         text = re.sub(rf"([A-Za-z0-9]){re.escape(full)}", lambda m, h=half: m.group(1) + h, text)
-    return _dedupe_punct(text)
+    text = _dedupe_punct(text)
+    return collapse_loops(text)
 
 
 def write_markdown(url: str, info: dict, segments, tr_info,
