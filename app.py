@@ -477,6 +477,7 @@ class App:
                                      font=UI_FONT, width=42, bg="white",
                                      fg=C_TEXT, relief="solid", bd=1)
         self.cookie_entry.pack(side="left", ipady=4)
+        self._attach_paste_menu(self.cookie_entry)
         self.cookie_button = ttk.Button(
             crow, text="选择 Netscape Cookie…", command=self._browse_cookie)
         self.cookie_button.pack(
@@ -553,6 +554,7 @@ class App:
         self.vocab_entry.pack(side="left", ipady=4)
         tk.Label(vrow, text="逗号分隔，如 陶哲轩,Numberphile", bg=C_CARD,
                  fg=C_MUTED, font=UI_FONT_SM).pack(side="left", padx=(8, 0))
+        self._attach_paste_menu(self.vocab_entry)
 
         self.dnd_hint = tk.Label(
             card, text="提示：直接粘贴 YouTube 链接即可；中英混排的视频请保持「自动检测/混合」",
@@ -713,7 +715,16 @@ class App:
             menu.tk_popup(event.x_root, event.y_root)
 
         widget.bind("<Button-3>", popup)
+
+        # 显式绑定常用快捷键。
+        # 只靠 Tk 的类绑定（Entry 默认有 <<Paste>>）在个别环境下不生效 ——
+        # 用户实测「专有名词」框按 Ctrl+V 粘不进去。这里把四条都显式接上，
+        # 不依赖平台默认行为。
         widget.bind("<Control-a>", lambda _e: (widget.select_range(0, "end"), "break")[1])
+        widget.bind("<Control-v>", lambda _e: (widget.event_generate("<<Paste>>"), "break")[1])
+        widget.bind("<Control-c>", lambda _e: (widget.event_generate("<<Copy>>"), "break")[1])
+        widget.bind("<Control-x>", lambda _e: (widget.event_generate("<<Cut>>"), "break")[1])
+        widget.bind("<Shift-Insert>", lambda _e: (widget.event_generate("<<Paste>>"), "break")[1])
         return menu
 
     # ==================================================================
