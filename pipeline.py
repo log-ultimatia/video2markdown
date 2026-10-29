@@ -2299,6 +2299,14 @@ def polish_text(text: str, fix_punct: bool = True, proxy: str | None = None) -> 
     # "we asked。" -> 应该是 "we asked."
     for full, half in {v: k for k, v in _HALF_TO_FULL.items()}.items():
         text = re.sub(rf"([A-Za-z0-9]){re.escape(full)}", lambda m, h=half: m.group(1) + h, text)
+    # 去掉"开头或换行之后"的多余标点。
+    # 现场（B 站纯中文视频）：
+    #   …似乎有自卑的銀河
+    #   ，護衛隊成員，而是專門…
+    # 逗号跑到了行首 / 段首。原因是 Whisper 把长句切断时把标点留在了下一段开头，
+    # 或者标点模型补标点时补在了句首。删掉即可，不影响语义。
+    text = re.sub(r"(^|\n)[ \t]*[，、；：。,;:]+[ \t]*", r"\1", text)
+
     # 兜底：不管这段文本经过了哪条路径（正常转写 / 混排细分重转 / 缓存恢复），
     # 输出前统一再转一次简体。OpenCC 是幂等的，重复调用没有副作用。
     text = to_simplified(text)
