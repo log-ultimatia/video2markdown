@@ -1717,6 +1717,108 @@ def _normalize_compat(text: str) -> str:
     return unicodedata.normalize("NFKC", text)
 
 
+def _longest_common(a: str, b: str) -> int:
+    """a 和 b 的最长【连续】公共片段长度。"""
+    import difflib
+    if not a or not b:
+        return 0
+    m = difflib.SequenceMatcher(None, a, b, autojunk=False).find_longest_match(
+        0, len(a), 0, len(b))
+    return m.size
+
+
+def _is_repeat(sentence: str, earlier: str, ratio: float = 0.45,
+               min_block: int = 6) -> bool:
+    """
+    判断一句话是不是前面内容的重复。
+
+    ## 为什么不用固定 n-gram 重叠率（上一版的做法）
+
+    实测失败的例子：
+
+      前文：另一件事AI公司算不算敌人。他说大公司追AGI的竞赛已经开始牺牲爱好。
+      重复：另一件是AI公司算不算敌人。
+
+    两条只差一个字（事/是），但把句子拆成 4-gram 再算重叠率——
+    开头几个 4-gram 全不匹配，重叠率被稀释到 0.57 左右，卡在阈值边缘。
+
+    改成"最长连续公共片段"：这两句的公共片段是 `公司算不算敌人。`（8 字），
+    占短句 14 字的一半以上 —— 一眼就是重复，不受开头差异影响。
+
+    参考做法：whisper 复读清理的常见实现都是找最长重复片段而不是按窗口打散，
+    见 VoiceStudio PR #356、whisper-guard。
+
+    ## 判据
+
+      · 最长公共片段 >= min_block（6 字，太短会误伤"他说"这种正常重复）
+      · 该片段占这句话的比例 >= ratio（默认 0.45）
+    6 字 / 0.45 是实测调出来的：真实输出里那条残句的公共片段是
+    `公司算不算敌人`（7 字，前一句用破折号接下文所以只对上 7 字），
+    占 14 字的 50%；阈值取 8 字时刚好漏掉。
+    """
+    if len(sentence) < min_block:
+        return False
+    return _longest_common(sentence, earlier) >= max(min_block, len(sentence) * ratio)
+
+
+def _drop_duplicate_sentences(text: str, verbose: bool = True) -> str:
+    """
+    去掉与前面重复的句子（Whisper 退化复读）。
+
+    两轮：
+      1. 正序扫一遍，每句和前文比，重复就丢
+      2. 从尾部逐句回删，直到尾部不再重复
+         （复读几乎总堆在末尾；尾部单独跑一轮能处理断句被打乱的情况）
+    """
+    parts = [x for x in re.split(r"(?<=[。！？!?])", text) if x.strip()]
+    if len(parts) < 2:
+        return text
+
+    kept: list[str] = []
+    history = ""
+    dropped = 0
+    for part in parts:
+        norm = re.sub(r"\s+", "", part)
+        if _is_repeat(norm, re.sub(r"\s+", "", history)):
+            dropped += 1
+            continue
+        kept.append(part)
+        history += part
+
+    # 第二轮：尾部回删
+    tail_dropped = 0
+    while len(kept) >= 3:
+        last = re.sub(r"\s+", "", kept[-1])
+        earlier = re.sub(r"\s+", "", "".join(kept[:-1]))
+        if not _is_repeat(last, earlier):
+            break
+        kept.pop()
+        tail_dropped += 1
+
+    if (dropped or tail_dropped) and verbose:
+        print(f"       [反复读] 去掉 {dropped} 句重复整句、{tail_dropped} 句尾部残句")
+    return "".join(kept)
+
+
+def _normalize_compat(text: str) -> str:
+    """
+    把「兼容形式」标点归一成标准字符。
+
+    为什么需要：CT-Transformer 补标点时，输出的不是 `，。？！`，
+    而是 U+FE50~FE6F 这些兼容形式（﹑ ﹐ ﹔ ﹒ ﹗ ﹖ ﹕ ﹞ ﹝ ﹛ ﹘）。
+    它们看着像标点，但：
+
+      · 我的去重/全角转换规则匹配的是 `[，。！？、；：]` —— 一个都匹配不上
+      · Markdown 渲染、搜索、复制到别处都会出问题
+      · 用户看到的就是"标点很怪、可读性差"
+
+    NFKC 归一正好把这类兼容字符折回标准形式（﹑->、 ﹐->, ﹒->. ﹗->!）。
+    折成半角之后再交给 _fullwidth_punct 统一转全角。
+    """
+    import unicodedata
+    return unicodedata.normalize("NFKC", text)
+
+
 def _ngrams(s: str, n: int = 4) -> set:
     return {s[i:i + n] for i in range(len(s) - n + 1)}
 
