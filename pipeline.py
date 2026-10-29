@@ -1584,7 +1584,12 @@ def refine_language_runs(segs, audio, rate: int, model, verbose: bool = True):
                 txt = (s.text or "").strip()
                 if not txt:
                     continue
-                fresh.append(Seg(round(start + s.start, 3), round(start + s.end, 3), txt,
+                # 必须再走一次繁转简：细分是重新调用 transcribe 产生的字幕，
+                # 不会经过 _run_once 里那一步 to_simplified。
+                # 实测某 B 站纯中文视频，细分出来的片段里繁体成片残留
+                # （"當火箭能換"、"戰鬥力"、"護衛隊"），就是漏了这一步。
+                fresh.append(Seg(round(start + s.start, 3), round(start + s.end, 3),
+                                 to_simplified(txt),
                                  getattr(run[0], "speaker", None)))
             if not fresh:                       # 重转没结果就别乱改
                 out.extend(run)
@@ -2294,6 +2299,9 @@ def polish_text(text: str, fix_punct: bool = True, proxy: str | None = None) -> 
     # "we asked。" -> 应该是 "we asked."
     for full, half in {v: k for k, v in _HALF_TO_FULL.items()}.items():
         text = re.sub(rf"([A-Za-z0-9]){re.escape(full)}", lambda m, h=half: m.group(1) + h, text)
+    # 兜底：不管这段文本经过了哪条路径（正常转写 / 混排细分重转 / 缓存恢复），
+    # 输出前统一再转一次简体。OpenCC 是幂等的，重复调用没有副作用。
+    text = to_simplified(text)
     text = _dedupe_punct(text)
     return collapse_loops(text)
 
