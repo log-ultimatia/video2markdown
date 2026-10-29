@@ -1765,6 +1765,130 @@ def _drop_duplicate_sentences(text: str, verbose: bool = True) -> str:
     """
     去掉与前面重复的句子（Whisper 退化复读）。
 
+    ## 设计原则：判定只看原文，删除只打标记
+
+    之前改了三轮都没修干净，根本原因是"边判边改"：
+    第一轮正序扫描删掉几句之后，第二轮回删时的参照文本已经不是原文了，
+    被删掉的句子里恰好含有残句的完整版本，导致最长公共片段变短、判不出来。
+
+    现在：
+      · 所有判定都基于【原始切句 + 原文拼接】，不受前面删了什么影响
+      · 删除只往 drop[] 里打标记，最后统一拼接
+    两轮因此互相独立。
+
+    ## 两轮做什么
+
+    第一轮（正序）：每句只和"原文中它前面的内容"比 —— 抓重复出现的整句。
+    第二轮（尾部回删）：从最后一句往前，每句和"原文里除它自己以外的全部"比 ——
+      抓堆在末尾的残句。参照用全文而不是前文，是因为复读的第二次出现
+      可能被打散成几句，用全文比对才能凑够公共片段长度。
+
+    ## 判据见 _is_repeat：最长连续公共片段 >= 6 字且占该句 >= 45%
+    """
+    parts = [x for x in re.split(r"(?<=[。！？!?])", text) if x.strip()]
+    if len(parts) < 2:
+        return text
+
+    norms = [re.sub(r"\s+", "", p) for p in parts]
+    total = "".join(norms)
+    offsets = [0]
+    for n in norms:
+        offsets.append(offsets[-1] + len(n))
+
+    drop = [False] * len(parts)
+
+    # 第一轮：正序，每句和前文比
+    for i in range(len(parts)):
+        if _is_repeat(norms[i], total[:offsets[i]]):
+            drop[i] = True
+
+    # 第二轮：尾部回删，每句和"原文去掉它自己"比
+    guard = 0
+    while sum(1 for d in drop if not d) > 2 and guard < len(parts):
+        guard += 1
+        idx = max((i for i in range(len(parts)) if not drop[i]), default=-1)
+        if idx < 0:
+            break
+        ref = total[:offsets[idx]] + total[offsets[idx + 1]:]
+        if not _is_repeat(norms[idx], ref):
+            break
+        drop[idx] = True
+
+    removed = sum(1 for d in drop if d)
+    if removed and verbose:
+        print(f"       [反复读] 去掉 {removed} 句重复内容")
+    if not removed:
+        return text
+    return "".join(p_ for i, p_ in enumerate(parts) if not drop[i])
+
+
+def _normalize_compat(text: str) -> str:
+    """
+    把「兼容形式」标点归一成标准字符。
+
+    为什么需要：CT-Transformer 补标点时，输出的不是 `，。？！`，
+    而是 U+FE50~FE6F 这些兼容形式（﹑ ﹐ ﹔ ﹒ ﹗ ﹖ ﹕ ﹞ ﹝ ﹛ ﹘）。
+    它们看着像标点，但：
+
+      · 我的去重/全角转换规则匹配的是 `[，。！？、；：]` —— 一个都匹配不上
+      · Markdown 渲染、搜索、复制到别处都会出问题
+      · 用户看到的就是"标点很怪、可读性差"
+
+    NFKC 归一正好把这类兼容字符折回标准形式（﹑->、 ﹐->, ﹒->. ﹗->!）。
+    折成半角之后再交给 _fullwidth_punct 统一转全角。
+    """
+    import unicodedata
+    return unicodedata.normalize("NFKC", text)
+
+
+def _longest_common(a: str, b: str) -> int:
+    """a 和 b 的最长【连续】公共片段长度。"""
+    import difflib
+    if not a or not b:
+        return 0
+    m = difflib.SequenceMatcher(None, a, b, autojunk=False).find_longest_match(
+        0, len(a), 0, len(b))
+    return m.size
+
+
+def _is_repeat(sentence: str, earlier: str, ratio: float = 0.45,
+               min_block: int = 6) -> bool:
+    """
+    判断一句话是不是前面内容的重复。
+
+    ## 为什么不用固定 n-gram 重叠率（上一版的做法）
+
+    实测失败的例子：
+
+      前文：另一件事AI公司算不算敌人。他说大公司追AGI的竞赛已经开始牺牲爱好。
+      重复：另一件是AI公司算不算敌人。
+
+    两条只差一个字（事/是），但把句子拆成 4-gram 再算重叠率——
+    开头几个 4-gram 全不匹配，重叠率被稀释到 0.57 左右，卡在阈值边缘。
+
+    改成"最长连续公共片段"：这两句的公共片段是 `公司算不算敌人。`（8 字），
+    占短句 14 字的一半以上 —— 一眼就是重复，不受开头差异影响。
+
+    参考做法：whisper 复读清理的常见实现都是找最长重复片段而不是按窗口打散，
+    见 VoiceStudio PR #356、whisper-guard。
+
+    ## 判据
+
+      · 最长公共片段 >= min_block（6 字，太短会误伤"他说"这种正常重复）
+      · 该片段占这句话的比例 >= ratio（默认 0.45）
+    6 字 / 0.45 是实测调出来的：真实输出里那条残句的公共片段是
+    `公司算不算敌人`（7 字，前一句用破折号接下文所以只对上 7 字），
+    占 14 字的 50%；阈值取 8 字时刚好漏掉。
+    """
+    if len(sentence) < min_block:
+        return False
+    return _longest_common(sentence, earlier) >= max(min_block, len(sentence) * ratio)
+
+
+def _drop_duplicate_sentences(text: str, verbose: bool = True) -> str:
+    """
+    去掉与前面重复的句子（Whisper 退化复读）。
+
     两轮：
       1. 正序扫一遍，每句和前文比，重复就丢
       2. 从尾部逐句回删，直到尾部不再重复
