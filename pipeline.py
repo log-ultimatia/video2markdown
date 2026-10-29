@@ -1786,11 +1786,21 @@ def _drop_duplicate_sentences(text: str, verbose: bool = True) -> str:
         history += part
 
     # 第二轮：尾部回删
+    #
+    # 参照文本必须是【原始全文】，不能是"已保留内容"。
+    # 上一版用 "".join(kept[:-1])：第一遍正序扫描已经删掉了几句，
+    # 被删句里正好含有那句残句的完整版本，于是参照里只剩半截，
+    # 最长公共片段从 7 字掉到不够长，循环就停了 —— 实测
+    # "另一件是 AI 公司算不算敌人。" 单独判定是 True，循环里却不删。
+    #
+    # 做法：整块原文去掉末尾这句自己，剩下的都当参照。
+    # 这样残句在原文任何位置出现过都能对上。
     tail_dropped = 0
+    full_raw = re.sub(r"\s+", "", "".join(parts))
     while len(kept) >= 3:
         last = re.sub(r"\s+", "", kept[-1])
-        earlier = re.sub(r"\s+", "", "".join(kept[:-1]))
-        if not _is_repeat(last, earlier):
+        ref = full_raw[:-len(last)] if len(last) < len(full_raw) else ""
+        if not _is_repeat(last, ref):
             break
         kept.pop()
         tail_dropped += 1
