@@ -848,6 +848,9 @@ def _get_npu_pipeline(model_size: str):
 _MODEL_CACHE: dict = {}
 
 
+# 语言检测专用模型。detect_language 只需要跑一遍编码器，
+# 用 base 代替用户选的 medium/large 能快 3~5 倍，判定结果几乎一样
+# （检测的是"这段像哪种语言"，不需要大模型的表达能力）。
 def _cpu_threads() -> int:
     """
     CPU 推理线程数。faster-whisper 默认 0（=4 线程），这台机器有 20 个物理核，
@@ -1345,8 +1348,23 @@ def transcribe(wav: Path, model_size: str = WHISPER_MODEL,
     pieces = [(s, e, None) for s, e in ranges]
     if forced_lang is None:
         try:
+            # 用 base 模型做检测（而不是用户选的 medium/large）：
+            # 实测同一支 6 分钟视频，medium 做检测单项要 ~160s（不在阶段明细里，
+            # 所以显示成"4·转写 193.7s"但明细只有 33.2s）。base 快 3~5 倍。
+            # 检测用和转写同一个模型。
+            # 试过换成 base（想更快），实测【更差也更慢】：
+            #   medium 检测：合计 49.5s，58 条字幕
+            #   base   检测：合计 54.7s，83 条字幕（置信度不同 -> 递归更多 ->
+            #               切得更碎 -> 分块变多 -> 转写反而慢）
+            # 所以不做这个替换，只保留下面的耗时打印。
             lang_model = _get_model(WhisperModel, model_size, *candidates[0])
+            # 检测耗时必须打出来。
+            # 之前它不计入任何阶段，用户看到"4·转写 193.7s"但明细只有 33.2s，
+            # 中间差的 160s 完全隐形 —— 排查时根本不知道时间去哪了。
+            _t_detect = time.time()
             pieces = _language_split(lang_model, audio, rate, ranges)
+            print(f"  语言检测耗时 {time.time() - _t_detect:.1f}s"
+                  f"（{'GPU' if candidates[0][0] == 'cuda' else 'CPU'}）")
             langs = [p[2] for p in pieces if p[2]]
             if len(pieces) > len(ranges):
                 print(f"  语言断点：{len(ranges)} 块 -> {len(pieces)} 段"
