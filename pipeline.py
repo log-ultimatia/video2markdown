@@ -163,10 +163,23 @@ def to_simplified(text: str) -> str:
 
 
 def prompt_for(lang: str | None) -> str | None:
-    """按语言挑提示词。"""
-    if not lang:
-        return None
-    return LANG_PROMPTS.get(lang.split("-")[0].lower())
+    """
+    按语言挑提示词，并把专有名词表（--vocab）拼进去。
+
+    这就是"词表偏置"：Whisper 把 initial_prompt 当作"上一段文本"，
+    里面出现过一次的词，解码时更倾向复现。实测能把"证名"拉回"证明"。
+
+    零依赖、零内存 —— 只是几十个 token 的字符串。YouTube 提升专有名词
+    准确率用的就是这个手段（它塞的是标题/频道名/描述）。
+    """
+    base = None
+    if lang:
+        base = LANG_PROMPTS.get(lang.split("-")[0].lower())
+    terms = [x.strip() for x in VOCAB_TERMS if x and x.strip()]
+    if not terms:
+        return base
+    # 放在最前面：模型对 prompt 开头更敏感
+    return f"这段内容涉及{'、'.join(terms)}。" + (base or "")
 
 
 class PipelineError(RuntimeError):
@@ -1670,6 +1683,9 @@ _CN_PUNCT = "，。！？、；：""''（）《》"
 _HALF_TO_FULL = {",": "，", ".": "。", "?": "？", "!": "！", ";": "；",
                  ":": "：", "(": "（", ")": "）"}
 
+# 专有名词表（--vocab 设置）。为空时不改提示词。
+VOCAB_TERMS: list[str] = []
+
 _PUNCT_MODEL_CACHE = None
 _PUNCT_MODEL_FIXED = False
 
@@ -1701,33 +1717,54 @@ def _normalize_compat(text: str) -> str:
     return unicodedata.normalize("NFKC", text)
 
 
+def _ngrams(s: str, n: int = 4) -> set:
+    return {s[i:i + n] for i in range(len(s) - n + 1)}
+
+
 def _drop_duplicate_sentences(text: str, verbose: bool = True) -> str:
     """
-    去掉与前面某句高度相似的整句（退化复读的另一种形态）。
+    去掉与前面高度重复的句子（退化复读）。
 
-    相似度用 difflib（标准库），阈值 0.80：既能抓住"牺牲爱好/牺牲安全"这种
-    只差一两个字的重复，又不会误删正常并列句。
+    ## 为什么不用"整句相等"或"difflib 相似度"
+
+    实测失败的例子：
+
+      第一次：另一件事 AI 公司算不算敌人—他说…已经开始牺牲爱好。
+      第二次：另一件是 AI 公司算不算敌人。他说…已经开始牺牲安全。
+
+    两次重复杂一两个字，而且【断句位置不同】（第一次是一整句，第二次被切成两句）。
+    按句切开再逐句比较，因为断句位置变了就匹配不上，实测完全失效。
+
+    ## 改用字符 n-gram 重叠率
+
+    把句子和"已保留的全部内容"都拆成 4 字片段，看这句的 4-gram 有多少
+    在已保留内容里出现过。>= 0.80 判为重复。
+
+    好处：不受断句位置和个别字差异影响。4-gram 对中文足够区分，
+    正常并列句（"他喜欢苹果。他喜欢香蕉。"）重叠率远低于阈值，不会误删。
     """
-    import difflib
     parts = re.split(r"(?<=[。！？!?])", text)
     kept: list[str] = []
+    kept_grams: set = set()
     dropped = 0
     for part in parts:
         norm = re.sub(r"\s+", "", part)
-        if len(norm) >= 8:
-            for prev in kept:
-                prev_norm = re.sub(r"\s+", "", prev)
-                if len(prev_norm) < 8:
-                    continue
-                if difflib.SequenceMatcher(None, prev_norm, norm).ratio() >= 0.80:
-                    dropped += 1
-                    break
-            else:
-                kept.append(part)
-        else:
+        if len(norm) < 8:
             kept.append(part)
+            continue
+        # 统一用 4-gram。试过"短句改用 3-gram"，因为 kept_grams 里混进了不同
+        # 长度的片段，比对反而失效（实测一条都没删掉），所以回退。
+        # 已知残留：十几字的重复短句（"另一件是AI公司算不算敌人。"）重叠率
+        # 约 0.7，达不到阈值，会留下来 —— 但重复的长句主体已经能删掉。
+        grams = _ngrams(norm)
+        overlap = (len(grams & kept_grams) / len(grams)) if grams else 0.0
+        if overlap >= 0.75:
+            dropped += 1
+            continue
+        kept.append(part)
+        kept_grams |= grams
     if dropped and verbose:
-        print(f"       [反复读] 去掉 {dropped} 句与前文高度重复的整句")
+        print(f"       [反复读] 去掉 {dropped} 句与前面高度重复的整句")
     return "".join(kept)
 
 
@@ -2206,6 +2243,9 @@ def main() -> int:
     parser.add_argument("--diarize-threshold", type=float,
                         default=diarize.DEFAULT_THRESHOLD, metavar="X",
                         help="说话人聚类阈值：调大更倾向合并为同一人")
+    parser.add_argument("--vocab", default=None, metavar="词1,词2",
+                        help="专有名词表，逗号分隔。会把这些人名/术语拼进提示词，"
+                             "提升识别准确率（如 陶哲轩,Numberphile,OpenAI）")
     parser.add_argument("--no-refine", action="store_true",
                         help="不做混排细分（默认会做：把缺标点的中文段单独重转）")
     parser.add_argument("--no-fix-punctuation", dest="fix_punct",
@@ -2213,9 +2253,12 @@ def main() -> int:
                         help="不做中文标点恢复（默认会做：中文缺标点时自动下载 62MB 模型补标点）")
     parser.add_argument("-o", "--out", type=Path, help="输出 Markdown 路径")
     args = parser.parse_args()
+    global _NO_REFINE
     if getattr(args, "no_refine", False):
-        global _NO_REFINE
         _NO_REFINE = True
+    if getattr(args, "vocab", None):
+        VOCAB_TERMS.extend(x.strip() for x in args.vocab.split(",") if x.strip())
+        print(f"[词表] 已启用 {len(VOCAB_TERMS)} 个专有名词：{'、'.join(VOCAB_TERMS)}")
 
     try:
         sys.stdout.reconfigure(encoding="utf-8")
