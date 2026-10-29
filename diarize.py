@@ -152,6 +152,22 @@ def ensure_models(model_root: Path, proxy: str | None = None) -> tuple[Path, Pat
 # ---------------------------------------------------------------------------
 # 分离
 # ---------------------------------------------------------------------------
+def _threads() -> int:
+    """
+    分割/嵌入的 onnxruntime 线程数。
+
+    实测千万别调大：这台机器（i7-14700HX，20 核，大小核混合）上
+      默认 1 线程   -> 分离 6 分钟音频 86.0s
+      8 线程        -> 160.4s（慢了近一倍）
+    大小核架构下多线程会互相抢核、被调度到 E-core 上，反而拖慢。
+    pyannote 分割本身是逐窗口的窄模型，单线程反而最稳。
+
+    所以固定返回 1，并把这段实测记录留在代码里 —— 免得以后有人（包括我）
+    看到"num_threads 默认 1"就顺手调大。
+    """
+    return 1
+
+
 def _build(model_root: Path, threshold: float, num_speakers: int, proxy: str | None):
     try:
         import sherpa_onnx
@@ -169,8 +185,10 @@ def _build(model_root: Path, threshold: float, num_speakers: int, proxy: str | N
             segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
                 pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(
                     model=str(seg_model)),
+                num_threads=_threads(),
             ),
-            embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=str(emb_model)),
+            embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(
+                model=str(emb_model), num_threads=_threads()),
             clustering=sherpa_onnx.FastClusteringConfig(
                 num_clusters=num_speakers, threshold=threshold),
             min_duration_on=0.5,      # 短于 0.5 秒的片段丢掉，避免碎段
