@@ -55,8 +55,42 @@ def run_check_env() -> int:
     return check_env.main()
 
 
+def selfcheck() -> int:
+    """
+    打印"打包后到底会调用什么"，用来排查"打包版点了没反应/找不到文件"。
+
+    打包版里 app.py 是编进 exe 的，外面看不到源码，只能靠它自报家门：
+        v2m-cli.exe --selfcheck
+    """
+    import app
+
+    print("=== 运行环境 ===")
+    print(f"  frozen      : {app.FROZEN}")
+    print(f"  可执行文件  : {sys.executable}")
+    print(f"  资源目录    : {app.LAB_DIR}")
+    print(f"  数据目录    : {app.DATA_DIR}")
+    print(f"  输出目录    : {app.OUTPUT_DIR}")
+    print()
+    print("=== 子系统命令 ===")
+    pipe = app._pipeline_cmd("URL")
+    env = app._check_env_cmd()
+    print(f"  流水线: {pipe}")
+    print(f"  自检  : {env}")
+    print()
+    print("=== 依赖文件是否存在 ===")
+    from pathlib import Path
+
+    for label, path in (("v2m-cli.exe", Path(pipe[0])),
+                        ("pipeline.py", app.PIPELINE),
+                        ("check_env.py", app.CHECK_ENV)):
+        print(f"  {label:<14} {'存在' if path.exists() else '不存在'}  {path}")
+    return 0
+
+
 def main() -> int:
     if len(sys.argv) > 1:
+        if sys.argv[1] == "--selfcheck":
+            return selfcheck()
         if sys.argv[1] == "--run-pipeline":
             return run_pipeline()
         if sys.argv[1] == "--run-check-env":

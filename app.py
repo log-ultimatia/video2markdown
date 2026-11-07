@@ -802,7 +802,9 @@ class App:
         if self.running:
             return
         py = _python_exe()
-        if not CHECK_ENV.exists():
+        # 打包版里 check_env.py 被编进 exe，磁盘上没有这个文件 —— 跳过检查。
+        # 之前没判断 FROZEN，导致打包版点「环境自检」直接弹「找不到 check_env.py」。
+        if not FROZEN and not CHECK_ENV.exists():
             messagebox.showerror("缺文件", f"找不到 {CHECK_ENV.name}")
             return
         self.log_line("=== 环境自检 ===", "step")
@@ -1002,7 +1004,9 @@ class App:
             messagebox.showwarning("还没填", "请先填视频链接，或点「选择本地文件…」。")
             self.entry.focus_set()
             return
-        if not PIPELINE.exists():
+        # 同上：打包版没有 pipeline.py 这个文件，它被编进 exe 了。
+        # 这正是用户在打包版里点「开始生成」却弹「找不到 pipeline.py」的原因。
+        if not FROZEN and not PIPELINE.exists():
             messagebox.showerror("缺文件", f"找不到 {PIPELINE.name}")
             return
 
@@ -1245,7 +1249,8 @@ class App:
         self.log_line("准备好了。填入 YouTube 链接，点「开始生成」。", "dim")
         self.log_line("首次运行会下载 Whisper 模型（base 约 145 MB）。", "dim")
         py = _python_exe()
-        if py != VENV_PY:
+        # 打包版本来就没有 .venv（解释器在 _internal 里），不该报警。
+        if not FROZEN and py != VENV_PY:
             self.log_line(f"⚠ 没找到项目虚拟环境，改用 {py}", "warn")
 
     # ==================================================================
