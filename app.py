@@ -103,12 +103,14 @@ BROWSER_COOKIE_CHOICES = (
 # ---------------------------------------------------------------------------
 # 配色
 # ---------------------------------------------------------------------------
-C_BG = "#f4f6fa"
-C_CARD = "#ffffff"
-C_BORDER = "#dbe2ea"
-C_TEXT = "#1c2b3a"
-C_MUTED = "#6b7c8f"
-C_ACCENT = "#1f3a5f"
+C_BG = "#f5f6f8"          # 页面底色：中性浅灰，不抢视线
+C_CARD = "#ffffff"        # 卡片
+C_BORDER = "#e4e7ec"      # 描边：比原来的浅，卡片更"浮"
+C_TEXT = "#0f172a"        # 正文：接近纯黑，对比更清晰
+C_MUTED = "#64748b"       # 次要文字
+C_ACCENT = "#4f46e5"      # 主色：靛蓝（替代原来的深藏青，更现代）
+C_ACCENT_DARK = "#4338ca"
+C_SUBTLE = "#f1f5f9"      # 悬停/选中底色
 C_OK = "#12805c"
 C_WARN = "#b45309"
 C_ERR = "#c0392b"
@@ -208,14 +210,47 @@ class App:
                         font=UI_FONT_SM)
         style.configure("Status.TLabel", background=C_BG, foreground=C_MUTED,
                         font=UI_FONT_SM)
-        style.configure("Primary.TButton", font=("Microsoft YaHei UI", 10, "bold"),
-                        padding=(16, 7))
-        style.configure("TButton", font=UI_FONT, padding=(10, 5))
-        style.configure("TCombobox", font=UI_FONT)
-        style.configure("Treeview", font=UI_FONT, rowheight=24,
+        # --- 按钮分三级：主操作（实心）/ 次操作（描边）/ 工具（无框）---
+        style.configure("TButton", font=UI_FONT, padding=(12, 6),
+                        background=C_CARD, foreground=C_TEXT, borderwidth=1)
+
+        style.configure("Secondary.TButton", font=UI_FONT, padding=(14, 6),
+                        background=C_CARD, foreground=C_TEXT)
+        style.map("Secondary.TButton",
+                  background=[("active", C_SUBTLE), ("pressed", C_BORDER)])
+
+        style.configure("Ghost.TButton", font=UI_FONT_SM, padding=(9, 5),
+                        background=C_CARD, foreground=C_MUTED, borderwidth=0)
+        style.map("Ghost.TButton",
+                  background=[("active", C_SUBTLE)],
+                  foreground=[("active", C_TEXT)])
+
+        style.configure("Accent.TButton", font=("Microsoft YaHei UI", 10, "bold"),
+                        padding=(20, 8), background=C_ACCENT,
+                        foreground="white", borderwidth=0)
+        style.map("Accent.TButton",
+                  background=[("active", C_ACCENT_DARK), ("disabled", "#c7d2fe")],
+                  foreground=[("disabled", "#ffffff")])
+
+        style.configure("TCombobox", font=UI_FONT, padding=4)
+        style.configure("TCheckbutton", background=C_CARD, font=UI_FONT_SM)
+
+        # --- 表格：去掉网格感，行高加大，选中用淡靛蓝 ---
+        style.configure("Treeview", font=UI_FONT, rowheight=26, borderwidth=0,
                         background=C_CARD, fieldbackground=C_CARD)
-        style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 9, "bold"))
-        style.configure("TProgressbar", thickness=8)
+        style.map("Treeview",
+                  background=[("selected", "#e0e7ff")],
+                  foreground=[("selected", C_TEXT)])
+        style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 9, "bold"),
+                        background="#f8fafc", foreground=C_MUTED,
+                        relief="flat", padding=(8, 7))
+        style.map("Treeview.Heading", background=[("active", C_SUBTLE)])
+
+        # --- 进度条：靛蓝实心，去掉边框 ---
+        style.configure("Accent.Horizontal.TProgressbar", thickness=6,
+                        troughcolor="#eef1f5", background=C_ACCENT,
+                        borderwidth=0, lightcolor=C_ACCENT, darkcolor=C_ACCENT)
+        style.configure("TProgressbar", thickness=6)
 
     # ---- 界面骨架 ----
     def _build(self) -> None:
@@ -643,34 +678,31 @@ class App:
         bar.pack(fill="x", pady=(11, 0))
 
         # 主操作：大一号、有底色
-        self.start_btn = tk.Button(bar, text="▶  开始生成",
-                                   font=(UI_FONT, 11, "bold"),
-                                   bg="#2563EB", fg="white",
-                                   activebackground="#1D4ED8", activeforeground="white",
-                                   relief="flat", bd=0, padx=22, pady=7,
-                                   cursor="hand2", command=self.start)
+        self.start_btn = ttk.Button(bar, text="▶  开始生成", style="Accent.TButton",
+                                    command=self.start)
         self.start_btn.pack(side="left")
 
         # 次操作：常规按钮
-        self.stop_btn = ttk.Button(bar, text="■  停止", command=self.stop,
-                                   state="disabled")
+        self.stop_btn = ttk.Button(bar, text="■  停止", style="Secondary.TButton",
+                                   command=self.stop, state="disabled")
         self.stop_btn.pack(side="left", padx=(10, 0))
 
-        ttk.Button(bar, text="⚙  更多设置",
+        ttk.Button(bar, text="⚙  更多设置", style="Secondary.TButton",
                    command=self._open_settings).pack(side="left", padx=(8, 0))
 
-        # 工具：右侧小字按钮
+        # 工具：右侧无框小按钮，视觉上退到最后一层
         for text, cmd in (("清空日志", self._clear_log),
                           ("打开输出目录", lambda: self._open_path(OUTPUT_DIR)),
                           ("环境自检", self.check_env),
                           ("诊断", self.run_diagnostics)):
-            ttk.Button(bar, text=text, command=cmd).pack(side="right", padx=(6, 0))
+            ttk.Button(bar, text=text, style="Ghost.TButton",
+                       command=cmd).pack(side="right", padx=(4, 0))
 
         prog = ttk.Frame(parent)
         prog.pack(fill="x", pady=(8, 0))
         # 精确进度（按阶段 + 转写百分比推进），不再是来回滚动的动画条
-        self.progress = ttk.Progressbar(prog, mode="determinate",
-                                        maximum=100, value=0)
+        self.progress = ttk.Progressbar(prog, mode="determinate", maximum=100,
+                                        value=0, style="Accent.Horizontal.TProgressbar")
         self.progress.pack(fill="x")
         self.status_var = tk.StringVar(value="就绪")
         ttk.Label(prog, textvariable=self.status_var, style="Status.TLabel").pack(
