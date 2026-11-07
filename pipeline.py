@@ -1287,8 +1287,15 @@ def transcribe(wav: Path, model_size: str = WHISPER_MODEL,
 
     WhisperModel = None
     if device_mode != "npu":
+        # 打印出来并计时：这行 import 要从磁盘加载 200~300MB 的 DLL
+        # （ctranslate2 / av / onnxruntime / tokenizers / numpy），
+        # 首次运行还要被 Windows Defender 逐个扫描，实测能卡 20~30 秒。
+        # 不打这一行的话界面上看起来像是"检查 CUDA 前就卡死了"。
+        print("  正在加载语音识别引擎（首次运行需要 20~40 秒，之后会快很多）…")
+        _t_import = time.time()
         try:
             from faster_whisper import WhisperModel
+            print(f"  引擎就绪（{time.time() - _t_import:.1f}s）")
         except ImportError as exc:
             raise PipelineError(
                 "没有装 faster-whisper。\n"
