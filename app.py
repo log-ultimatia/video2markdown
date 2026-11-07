@@ -416,182 +416,255 @@ class App:
             anchor="w", padx=20, pady=(0, 11))
 
     def _build_source(self, parent) -> None:
-        ttk.Label(parent, text="① 视频来源", style="Section.TLabel").pack(
-            anchor="w", pady=(2, 5))
+        """
+        视频来源卡片 —— 只保留"最常用"的东西。
 
+        以前这张卡塞了 7 行控件（代理、Cookies、模型、语言、设备、说话人分离、
+        专有名词），用户反馈"按钮分不清重点、全都糊在一起"。现在：
+          · 主界面只留：链接输入 + 选择本地文件 + 一句提示
+          · 其余全部收进「⚙ 更多设置」对话框
+        """
         card = tk.Frame(parent, bg=C_CARD, highlightbackground=C_BORDER,
                         highlightthickness=1)
-        card.pack(fill="x")
+        card.pack(fill="x", pady=(8, 0))
 
-        row = tk.Frame(card, bg=C_CARD)
-        row.pack(fill="x", padx=12, pady=(10, 4))
+        tk.Label(card, text="① 视频来源", bg=C_CARD, fg=C_TEXT,
+                 font=(UI_FONT, 10, "bold")).pack(anchor="w", padx=12, pady=(8, 6))
+
+        # ---------------------------------------------------------------- 链接
+        srow = tk.Frame(card, bg=C_CARD)
+        srow.pack(fill="x", padx=12, pady=(0, 4))
         self.source_var = tk.StringVar()
-        self.entry = tk.Entry(
-            row, textvariable=self.source_var, font=UI_FONT,
-            bg="white", fg=C_TEXT, relief="solid", bd=1,
-            insertbackground=C_TEXT)
+        self.entry = tk.Entry(srow, textvariable=self.source_var, font=UI_FONT,
+                              bg="white", fg=C_TEXT, relief="solid", bd=1)
         self.entry.pack(side="left", fill="x", expand=True, ipady=5)
         self.entry.bind("<Return>", lambda _e: self.start())
         self._attach_paste_menu(self.entry)
 
-        ttk.Button(row, text="选择本地文件…", command=self._browse).pack(
-            side="left", padx=(8, 0))
+        ttk.Button(srow, text="选择本地文件…",
+                   command=self._browse).pack(side="left", padx=(8, 0))
 
-        # 代理
-        prow = tk.Frame(card, bg=C_CARD)
-        prow.pack(fill="x", padx=12, pady=(1, 3))
-        tk.Label(prow, text="代理：", bg=C_CARD, fg=C_MUTED,
-                 font=UI_FONT).pack(side="left")
+        # ---------------------------------------------------------------- 提示
+        self.dnd_hint = tk.Label(
+            card,
+            text="直接粘贴链接，点「开始生成」即可。默认 small 模型 + 自动检测语言；"
+                 "要改代理 / 模型 / 说话人分离，点「⚙ 更多设置」。",
+            bg=C_CARD, fg=C_MUTED, font=UI_FONT_SM, justify="left")
+        self.dnd_hint.pack(anchor="w", padx=12, pady=(2, 8))
+
+        # ---------------------------------------------------------------- 变量
+        # 【重要】所有配置变量在这里创建（不是等对话框打开才创建）。
+        # 这样用户从头到尾没点过「更多设置」，_build_cmd() 也能拿到默认值。
         self.proxy_var = tk.StringVar(value=DEFAULT_PROXY)
-        self.proxy_entry = tk.Entry(
-            prow, textvariable=self.proxy_var, font=UI_FONT, width=28,
-            bg="white", fg=C_TEXT, relief="solid", bd=1)
-        self.proxy_entry.pack(side="left", ipady=4)
-        self.proxy_state = tk.Label(prow, text="", bg=C_CARD, fg=C_MUTED,
-                                    font=UI_FONT_SM)
-        self.proxy_state.pack(side="left", padx=(8, 0))
-        ttk.Button(prow, text="检测", width=6,
-                   command=self.test_proxy).pack(side="left", padx=(8, 0))
         self.no_proxy_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(prow, text="不使用代理", variable=self.no_proxy_var,
+        self.browser_cookies_var = tk.BooleanVar(value=False)
+        self.browser_cookie_var = tk.StringVar(value="Chrome")
+        self.cookie_var = tk.StringVar()
+        self.model_var = tk.StringVar(value="small")
+        self.lang_var = tk.StringVar(value="自动检测/混合")
+        self.resume_var = tk.BooleanVar(value=True)
+        self.device_var = tk.StringVar(value="自动（推荐）")
+        self.speakers_var = tk.BooleanVar(value=False)
+        self.speaker_count_var = tk.StringVar(value="自动（估算）")
+        self.vocab_var = tk.StringVar()
+
+        # 对话框里的控件引用（没打开过就是 None，回调里要判空）
+        self._settings_win = None
+        self.model_tip = None
+        self.device_tip = None
+        self.cookie_entry = None
+        self.cookie_button = None
+        self.browser_cookie_box = None
+
+    # ==================================================================
+    # 更多设置（对话框）
+    # ==================================================================
+    def _open_settings(self) -> None:
+        """把所有不常用的配置收进一个对话框，主界面因此只剩三个按钮。"""
+        if self._settings_win is not None and self._settings_win.winfo_exists():
+            self._settings_win.lift()
+            self._settings_win.focus_force()
+            return
+
+        win = tk.Toplevel(self.root)
+        self._settings_win = win
+        win.title("更多设置")
+        win.configure(bg=C_CARD)
+        win.transient(self.root)
+        win.resizable(False, False)
+        win.bind("<Escape>", lambda _e: win.destroy())
+
+        body = tk.Frame(win, bg=C_CARD)
+        body.pack(fill="both", expand=True, padx=16, pady=14)
+
+        def section(title: str) -> tk.Frame:
+            tk.Label(body, text=title, bg=C_CARD, fg=C_TEXT,
+                     font=(UI_FONT, 10, "bold")).pack(anchor="w", pady=(10, 4))
+            f = tk.Frame(body, bg=C_CARD)
+            f.pack(fill="x")
+            return f
+
+        # ------------------------------------------------ 网络
+        net = section("网络")
+        tk.Label(net, text="代理", bg=C_CARD, fg=C_MUTED,
+                 font=UI_FONT).pack(side="left")
+        tk.Entry(net, textvariable=self.proxy_var, font=UI_FONT, width=30,
+                 bg="white", fg=C_TEXT, relief="solid", bd=1).pack(
+            side="left", padx=(8, 0), ipady=3)
+        ttk.Button(net, text="检测", width=6,
+                   command=self.test_proxy).pack(side="left", padx=(6, 0))
+        tk.Checkbutton(net, text="不使用代理", variable=self.no_proxy_var,
                        bg=C_CARD, fg=C_MUTED, font=UI_FONT_SM,
                        activebackground=C_CARD, selectcolor=C_CARD).pack(
             side="left", padx=(10, 0))
 
-        brow = tk.Frame(card, bg=C_CARD)
-        brow.pack(fill="x", padx=12, pady=(1, 3))
-        # 默认【关】：公开视频不需要 cookie。默认去读浏览器 cookie 库既让人意外，
-        # 又容易因为浏览器占用 cookie DB 而失败。需要登录的视频用户自己勾。
-        self.browser_cookies_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(
-            brow, text="从浏览器读取 Cookies", variable=self.browser_cookies_var,
-            bg=C_CARD, fg=C_MUTED, font=UI_FONT_SM,
-            activebackground=C_CARD, selectcolor=C_CARD,
-            command=self._on_cookie_mode_change).pack(side="left")
-        self.browser_cookie_var = tk.StringVar(value="Chrome")
+        # ------------------------------------------------ Cookies
+        ck = section("Cookies（只有会员 / 需登录的视频才用）")
+        tk.Checkbutton(ck, text="从浏览器读取 Cookies",
+                       variable=self.browser_cookies_var,
+                       command=self._on_cookie_mode_change,
+                       bg=C_CARD, fg=C_MUTED, font=UI_FONT_SM,
+                       activebackground=C_CARD, selectcolor=C_CARD).pack(side="left")
         self.browser_cookie_box = ttk.Combobox(
-            brow, textvariable=self.browser_cookie_var, state="readonly", width=10,
+            ck, textvariable=self.browser_cookie_var, state="readonly", width=10,
             values=[label for label, _ in BROWSER_COOKIE_CHOICES], font=UI_FONT)
         self.browser_cookie_box.pack(side="left", padx=(8, 0))
-        tk.Label(brow, text="（可取消后使用 Netscape 文件）", bg=C_CARD,
-                 fg=C_MUTED, font=UI_FONT_SM).pack(side="left", padx=(8, 0))
 
-        crow = tk.Frame(card, bg=C_CARD)
-        crow.pack(fill="x", padx=12, pady=(1, 3))
-        tk.Label(crow, text="Netscape Cookie：", bg=C_CARD, fg=C_MUTED,
+        ck2 = tk.Frame(body, bg=C_CARD)
+        ck2.pack(fill="x", pady=(4, 0))
+        tk.Label(ck2, text="Netscape Cookie", bg=C_CARD, fg=C_MUTED,
                  font=UI_FONT).pack(side="left")
-        self.cookie_var = tk.StringVar()
-        self.cookie_entry = tk.Entry(crow, textvariable=self.cookie_var,
-                                     font=UI_FONT, width=42, bg="white",
+        self.cookie_entry = tk.Entry(ck2, textvariable=self.cookie_var,
+                                     font=UI_FONT, width=38, bg="white",
                                      fg=C_TEXT, relief="solid", bd=1)
-        self.cookie_entry.pack(side="left", ipady=4)
-        self._attach_paste_menu(self.cookie_entry)
-        self.cookie_button = ttk.Button(
-            crow, text="选择 Netscape Cookie…", command=self._browse_cookie)
-        self.cookie_button.pack(
-            side="left", padx=(8, 0))
+        self.cookie_entry.pack(side="left", padx=(8, 0), ipady=3)
+        self.cookie_button = ttk.Button(ck2, text="选择…",
+                                        command=self._browse_cookie)
+        self.cookie_button.pack(side="left", padx=(6, 0))
         self._on_cookie_mode_change()
+        self._attach_paste_menu(self.cookie_entry)
 
-        # 模型
-        mrow = tk.Frame(card, bg=C_CARD)
-        mrow.pack(fill="x", padx=12, pady=(2, 7))
-        tk.Label(mrow, text="模型：", bg=C_CARD, fg=C_MUTED,
+        # ------------------------------------------------ 识别
+        rec = section("识别")
+        r1 = tk.Frame(body, bg=C_CARD)
+        r1.pack(fill="x")
+        tk.Label(r1, text="模型", bg=C_CARD, fg=C_MUTED,
                  font=UI_FONT).pack(side="left")
-        self.model_var = tk.StringVar(value="small")
-        self.model_box = ttk.Combobox(
-            mrow, textvariable=self.model_var, state="readonly", width=8,
-            values=[m for m, _ in MODEL_CHOICES], font=UI_FONT)
-        self.model_box.pack(side="left")
-        self.model_tip = tk.Label(mrow, text="", bg=C_CARD, fg=C_MUTED,
+        ttk.Combobox(r1, textvariable=self.model_var, state="readonly", width=12,
+                     values=[label for label, _ in MODEL_CHOICES],
+                     font=UI_FONT).pack(side="left", padx=(8, 0))
+        self.model_tip = tk.Label(r1, text="", bg=C_CARD, fg=C_MUTED,
                                   font=UI_FONT_SM)
         self.model_tip.pack(side="left", padx=(8, 0))
-        self.model_box.bind("<<ComboboxSelected>>", self._on_model_change)
         self._on_model_change()
 
-        # 语言：默认自动检测；指定后能省掉检测步骤，也避免误判
-        tk.Label(mrow, text="语言：", bg=C_CARD, fg=C_MUTED,
-                 font=UI_FONT).pack(side="left", padx=(14, 0))
-        self.lang_var = tk.StringVar(value="自动检测/混合")
-        self.lang_box = ttk.Combobox(
-            mrow, textvariable=self.lang_var, state="readonly", width=12,
-            values=[label for label, _ in LANG_CHOICES], font=UI_FONT)
-        self.lang_box.pack(side="left")
-
-        # 断点续跑：转写按 5 分钟分块存盘，中途停止后可以从缺的块继续
-        self.resume_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(mrow, text="断点续跑", variable=self.resume_var,
-                       bg=C_CARD, fg=C_MUTED, font=UI_FONT_SM,
-                       activebackground=C_CARD, selectcolor=C_CARD).pack(
-            side="left", padx=(14, 0))
-
-
-        drow = tk.Frame(card, bg=C_CARD)
-        drow.pack(fill="x", padx=12, pady=(1, 3))
-        tk.Label(drow, text="设备：", bg=C_CARD, fg=C_MUTED,
+        r2 = tk.Frame(body, bg=C_CARD)
+        r2.pack(fill="x", pady=(4, 0))
+        tk.Label(r2, text="语言", bg=C_CARD, fg=C_MUTED,
                  font=UI_FONT).pack(side="left")
-        self.device_var = tk.StringVar(value="自动（推荐）")
-        self.device_box = ttk.Combobox(
-            drow, textvariable=self.device_var, state="readonly", width=16,
-            values=[label for label, _ in DEVICE_CHOICES], font=UI_FONT)
-        self.device_box.pack(side="left")
-        self.device_box.bind("<<ComboboxSelected>>", self._on_device_change)
-
-        # 说话人分离：多人对话/访谈用。默认关 —— 它会让总耗时大约翻倍。
-        # 放在设备这一行，是为了不额外占一行把日志区压扁。
-        tk.Frame(drow, width=14, bg=C_CARD).pack(side="left")
-        self.speakers_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(drow, text="说话人分离", variable=self.speakers_var,
-                       bg=C_CARD, fg=C_MUTED, font=UI_FONT_SM,
-                       activebackground=C_CARD, selectcolor=C_CARD).pack(
-            side="left")
-        self.speaker_count_var = tk.StringVar(value="自动（估算）")
-        self.speaker_count_box = ttk.Combobox(
-            drow, textvariable=self.speaker_count_var, state="readonly",
-            width=6, values=["自动（估算）", "2 人", "3 人", "4 人", "5 人"],
-            font=UI_FONT)
-        self.speaker_count_box.pack(side="left", padx=(4, 0))
-
-        # 专有名词表（词表偏置）：填进提示词，提升人名/术语准确率。
-        vrow = tk.Frame(card, bg=C_CARD)
-        vrow.pack(fill="x", padx=12, pady=(1, 3))
-        tk.Label(vrow, text="专有名词：", bg=C_CARD, fg=C_MUTED,
-                 font=UI_FONT).pack(side="left")
-        self.vocab_var = tk.StringVar(value="")
-        self.vocab_entry = tk.Entry(vrow, textvariable=self.vocab_var, font=UI_FONT,
-                                   width=52, bg="white", fg=C_TEXT, relief="solid", bd=1)
-        self.vocab_entry.pack(side="left", ipady=4)
-        tk.Label(vrow, text="逗号分隔，如 陶哲轩,Numberphile", bg=C_CARD,
+        ttk.Combobox(r2, textvariable=self.lang_var, state="readonly", width=14,
+                     values=[label for label, _ in LANG_CHOICES],
+                     font=UI_FONT).pack(side="left", padx=(8, 0))
+        tk.Label(r2, text="中英混排请保持「自动检测/混合」", bg=C_CARD,
                  fg=C_MUTED, font=UI_FONT_SM).pack(side="left", padx=(8, 0))
-        self._attach_paste_menu(self.vocab_entry)
 
-        self.dnd_hint = tk.Label(
-            card, text="提示：直接粘贴 YouTube 链接即可；中英混排的视频请保持「自动检测/混合」",
-            bg=C_CARD, fg=C_MUTED, font=UI_FONT_SM)
-        self.dnd_hint.pack(anchor="w", padx=12, pady=(0, 6))
+        r3 = tk.Frame(body, bg=C_CARD)
+        r3.pack(fill="x", pady=(4, 0))
+        tk.Label(r3, text="设备", bg=C_CARD, fg=C_MUTED,
+                 font=UI_FONT).pack(side="left")
+        dev_box = ttk.Combobox(r3, textvariable=self.device_var,
+                               state="readonly", width=22,
+                               values=[label for label, _ in DEVICE_CHOICES],
+                               font=UI_FONT)
+        dev_box.pack(side="left", padx=(8, 0))
+        dev_box.bind("<<ComboboxSelected>>", self._on_device_change)
+        self.device_tip = tk.Label(r3, text="", bg=C_CARD, fg=C_MUTED,
+                                   font=UI_FONT_SM)
+        self.device_tip.pack(side="left", padx=(8, 0))
+        self._on_device_change()
+
+        r4 = tk.Frame(body, bg=C_CARD)
+        r4.pack(fill="x", pady=(4, 0))
+        tk.Checkbutton(r4, text="断点续跑（中途停止后可继续）",
+                       variable=self.resume_var, bg=C_CARD, fg=C_MUTED,
+                       font=UI_FONT_SM, activebackground=C_CARD,
+                       selectcolor=C_CARD).pack(side="left")
+
+        # ------------------------------------------------ 说话人分离
+        sp = section("说话人分离（多人对话 / 访谈用）")
+        tk.Checkbutton(sp, text="开启", variable=self.speakers_var,
+                       bg=C_CARD, fg=C_MUTED, font=UI_FONT_SM,
+                       activebackground=C_CARD, selectcolor=C_CARD).pack(side="left")
+        tk.Label(sp, text="人数", bg=C_CARD, fg=C_MUTED,
+                 font=UI_FONT).pack(side="left", padx=(12, 0))
+        ttk.Combobox(sp, textvariable=self.speaker_count_var, state="readonly",
+                     width=12, values=["自动（估算）", "2 人", "3 人", "4 人", "5 人"],
+                     font=UI_FONT).pack(side="left", padx=(6, 0))
+        tk.Label(sp, text="会让总耗时约翻倍；已知人数请手选，自动估算不准",
+                 bg=C_CARD, fg=C_MUTED, font=UI_FONT_SM).pack(side="left", padx=(8, 0))
+
+        # ------------------------------------------------ 专有名词
+        vo = section("专有名词（提升人名 / 术语准确率）")
+        tk.Entry(vo, textvariable=self.vocab_var, font=UI_FONT, width=52,
+                 bg="white", fg=C_TEXT, relief="solid", bd=1).pack(side="left", ipady=3)
+        tk.Label(vo, text="逗号分隔，如 陶哲轩,Numberphile", bg=C_CARD,
+                 fg=C_MUTED, font=UI_FONT_SM).pack(side="left", padx=(8, 0))
+
+        # ------------------------------------------------ 工具
+        tools = section("工具")
+        ttk.Button(tools, text="环境自检",
+                   command=self.check_env).pack(side="left")
+        ttk.Button(tools, text="诊断", command=self.run_diagnostics).pack(
+            side="left", padx=(6, 0))
+        ttk.Button(tools, text="清空日志", command=self._clear_log).pack(
+            side="left", padx=(6, 0))
+        ttk.Button(tools, text="打开输出目录",
+                   command=lambda: self._open_path(OUTPUT_DIR)).pack(
+            side="left", padx=(6, 0))
+
+        # ------------------------------------------------ 关闭
+        foot = tk.Frame(win, bg=C_CARD)
+        foot.pack(fill="x", padx=16, pady=(4, 14))
+        ttk.Button(foot, text="关闭", command=win.destroy).pack(side="right")
+
+        # 居中到主窗口
+        win.update_idletasks()
+        try:
+            x = self.root.winfo_rootx() + (self.root.winfo_width() - win.winfo_width()) // 2
+            y = self.root.winfo_rooty() + 80
+            win.geometry(f"+{max(0, x)}+{max(0, y)}")
+        except Exception:
+            pass
+        win.focus_force()
 
     def _build_actions(self, parent) -> None:
-        bar = ttk.Frame(parent)
+        """操作栏 —— 三个主按钮 + 一排小工具，靠字号和留白分出主次。"""
+        bar = tk.Frame(parent, bg=C_BG)
         bar.pack(fill="x", pady=(11, 0))
 
-        self.start_btn = ttk.Button(bar, text="▶  开始生成", style="Primary.TButton",
-                                    command=self.start)
+        # 主操作：大一号、有底色
+        self.start_btn = tk.Button(bar, text="▶  开始生成",
+                                   font=(UI_FONT, 11, "bold"),
+                                   bg="#2563EB", fg="white",
+                                   activebackground="#1D4ED8", activeforeground="white",
+                                   relief="flat", bd=0, padx=22, pady=7,
+                                   cursor="hand2", command=self.start)
         self.start_btn.pack(side="left")
 
+        # 次操作：常规按钮
         self.stop_btn = ttk.Button(bar, text="■  停止", command=self.stop,
                                    state="disabled")
-        self.stop_btn.pack(side="left", padx=(8, 0))
+        self.stop_btn.pack(side="left", padx=(10, 0))
 
-        self.env_btn = ttk.Button(bar, text="环境自检", command=self.check_env)
-        self.env_btn.pack(side="left", padx=(8, 0))
+        ttk.Button(bar, text="⚙  更多设置",
+                   command=self._open_settings).pack(side="left", padx=(8, 0))
 
-        # 打开方式的现场诊断：结果直接打在日志区，截图就能看到
-        self.diag_btn = ttk.Button(bar, text="诊断", command=self.run_diagnostics)
-        self.diag_btn.pack(side="left", padx=(8, 0))
-
-        ttk.Button(bar, text="打开输出目录",
-                   command=lambda: self._open_path(OUTPUT_DIR)).pack(side="right")
-        ttk.Button(bar, text="清空日志", command=self._clear_log).pack(
-            side="right", padx=(0, 8))
+        # 工具：右侧小字按钮
+        for text, cmd in (("清空日志", self._clear_log),
+                          ("打开输出目录", lambda: self._open_path(OUTPUT_DIR)),
+                          ("环境自检", self.check_env),
+                          ("诊断", self.run_diagnostics)):
+            ttk.Button(bar, text=text, command=cmd).pack(side="right", padx=(6, 0))
 
         prog = ttk.Frame(parent)
         prog.pack(fill="x", pady=(8, 0))
@@ -619,7 +692,6 @@ class App:
         tk.Label(inner, textvariable=self.total_var, bg=C_CARD, fg=C_MUTED,
                  font=("Consolas", 9)).pack(side="right")
         self._render_stages()
-
     def _build_outputs(self, parent) -> None:
         ttk.Label(parent, text="② 生成的笔记（Markdown）",
                   style="Section.TLabel").pack(anchor="w", pady=(12, 5))
