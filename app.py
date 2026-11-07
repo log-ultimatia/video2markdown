@@ -38,11 +38,19 @@ from tkinter import filedialog, messagebox, ttk
 # ---------------------------------------------------------------------------
 # 路径（全部相对本文件，与 cwd 无关）
 # ---------------------------------------------------------------------------
-LAB_DIR = Path(__file__).resolve().parent
+# 打包成 exe 后（PyInstaller onedir）：
+#   sys.frozen = True，资源在 sys._MEIPASS（就是 exe 所在目录）
+#   此时 __file__ 指向包内路径，不能用来推导"项目根"
+# 所以分两种情况。下载/输出/模型目录会落在 exe 旁边，用户看得见。
+FROZEN = bool(getattr(sys, "frozen", False))
+LAB_DIR = (Path(sys._MEIPASS) if FROZEN and hasattr(sys, "_MEIPASS")
+           else Path(__file__).resolve().parent)
 VENV_PY = LAB_DIR / ".venv" / "Scripts" / "python.exe"
 PIPELINE = LAB_DIR / "pipeline.py"
 CHECK_ENV = LAB_DIR / "check_env.py"
-OUTPUT_DIR = LAB_DIR / "output"
+# GUI 也要跟着流水线的数据目录走，否则"打开输出目录"会指错地方。
+DATA_DIR = Path(sys.executable).parent if FROZEN else LAB_DIR
+OUTPUT_DIR = DATA_DIR / "output"
 DOWNLOAD_DIR = LAB_DIR / "downloads"
 ASSETS = LAB_DIR / "assets"
 ICON = ASSETS / "youtube2md.ico"
@@ -798,7 +806,7 @@ class App:
             messagebox.showerror("缺文件", f"找不到 {CHECK_ENV.name}")
             return
         self.log_line("=== 环境自检 ===", "step")
-        cmd = [str(py), str(CHECK_ENV)]
+        cmd = _check_env_cmd()
         if self.no_proxy_var.get():
             cmd.append("--no-proxy")
         else:
@@ -958,8 +966,8 @@ class App:
         return int(digits) if digits else -1
 
     def _build_cmd(self, source: str) -> list:
-        cmd = [str(_python_exe()), "-u", str(PIPELINE), source,
-               "--model", self.model_var.get()]
+        cmd = _pipeline_cmd(source)
+        cmd += ["--model", self.model_var.get()]
         lang = self._selected_lang()
         if lang:
             cmd += ["--lang", lang]
@@ -1624,6 +1632,35 @@ def wait_new_explorer_window(before: int, timeout: float = 2.0) -> bool:
             return True
         _t.sleep(0.2)
     return False
+
+
+def _pipeline_cmd(source: str) -> list:
+    """
+    拼出"跑流水线"的命令。
+
+    开发模式：python.exe -u pipeline.py <source> ...
+    打包模式：video2markdown.exe --run-pipeline <source> ...
+      因为冻结后 sys.executable 是 exe 自己，拼 pipeline.py 只会再开一个界面。
+    """
+    if FROZEN:
+        # 打包版：用同目录下的 v2m-cli.exe（有控制台，stdout 可被捕获）。
+        # 不能用 sys.executable —— 那是 GUI 的 windowed exe，没有 stdout，
+        # 子进程一 print 就崩，界面也收不到任何日志。
+        cli = Path(sys.executable).with_name("v2m-cli.exe")
+        if cli.exists():
+            return [str(cli), "--run-pipeline", source]
+        return [sys.executable, "--run-pipeline", source]
+    return [str(_python_exe()), "-u", str(PIPELINE), source]
+
+
+def _check_env_cmd() -> list:
+    """同 _pipeline_cmd，环境自检的命令。"""
+    if FROZEN:
+        cli = Path(sys.executable).with_name("v2m-cli.exe")
+        if cli.exists():
+            return [str(cli), "--run-check-env"]
+        return [sys.executable, "--run-check-env"]
+    return [str(_python_exe()), str(CHECK_ENV)]
 
 
 def _python_exe() -> Path:

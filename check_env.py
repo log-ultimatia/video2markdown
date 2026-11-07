@@ -127,6 +127,18 @@ def check_python(rep: Report) -> None:
         )
         return
 
+    # 版本上限：不是我们不想支持，是上游依赖还没发对应版本的预编译轮子。
+    # 实测（2026-11）：av 19 要求 >=3.12 且没有 cp315 轮子；
+    # onnxruntime 1.31 要求 >=3.11 也没有 cp315。
+    # 在 3.14 / 3.15 上 pip install 会在编译 av 时失败（需要 FFmpeg 开发头文件）。
+    if ver[:2] >= (3, 14):
+        rep.warn(
+            f"Python {text} 太新，依赖装不上",
+            "av / onnxruntime 目前没有这个版本的预编译包（不是本项目能决定的）。\n"
+            "   请用 Python 3.10 ~ 3.13；\n"
+            "   或者直接下载发布页的绿色版压缩包 —— 里面内置了 Python 3.13，"
+            "解压双击就能用，不需要装任何东西。",
+        )
     rep.ok(f"Python {text}", f"({sys.executable})")
     if ver[:2] < RECOMMENDED_PYTHON:
         rep.warn("建议用 3.10 及以上", "3.9 能跑，但部分依赖的轮子更新更慢")

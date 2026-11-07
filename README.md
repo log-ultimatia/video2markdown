@@ -14,6 +14,28 @@
 
 `Python` · `Windows-first GUI` · `faster-whisper` · `MIT`
 
+> ## 不想折腾环境？直接下载绿色版
+>
+> 到 [Releases](https://github.com/log-ultimatia/video2markdown/releases) 下载
+> `video2markdown-windows-x64.zip`（约 130 MB），**解压后双击 `video2markdown.exe` 就能用**。
+>
+> 里面已经包含：Python 3.13 运行时、全部依赖、ffmpeg、图形界面。
+> **不需要装 Python、不需要 pip、不需要配环境变量。**
+> 唯一需要联网的是首次运行时自动下载 Whisper 模型（约 484 MB，走国内镜像）。
+>
+> 想用 GPU 加速（快 3~5 倍）再看下面「安装」一节的说明。
+>
+> <details>
+> <summary>Python 版本兼容性（源码方式运行）</summary>
+>
+> | Python | 状态 |
+> |---|---|
+> | 3.10 ~ 3.13 | ✅ 推荐 |
+> | 3.14 / 3.15 | ❌ 装不上 —— `av`、`onnxruntime` 还没发对应版本的预编译包（上游限制） |
+>
+> 绿色版内置 Python 3.13，所以不受这个限制影响。
+> </details>
+
 ---
 
 ## English

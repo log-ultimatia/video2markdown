@@ -1,0 +1,73 @@
+name: Release
+
+# 打一个 tag（例如 v1.0.0）就自动构建绿色版并挂到 Release 上。
+#
+#   git tag v1.0.0
+#   git push origin v1.0.0
+#
+# 也可以在 Actions 页面手动触发（workflow_dispatch），只出 artifact 不发 Release。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write          # 创建 Release 需要
+
+jobs:
+  build-windows:
+    name: Build Windows package
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # 固定 3.13：这是所有依赖都有预编译轮子的最高版本。
+          # 3.14/3.15 上 av、onnxruntime 还没有对应轮子，装不上。
+          python-version: "3.13"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: 构建
+        run: |
+          python -m PyInstaller --noconfirm --clean `
+            --distpath packaging/dist --workpath packaging/build `
+            packaging/video2markdown.spec
+
+      - name: 写使用说明
+        shell: pwsh
+        run: |
+          Copy-Item packaging/使用说明.txt "packaging/dist/video2markdown/使用说明.txt" -ErrorAction SilentlyContinue
+
+      - name: 打包成 zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "packaging/dist/video2markdown/*" `
+            -DestinationPath "packaging/video2markdown-windows-x64.zip"
+
+      - name: 上传构建产物（万一发版步骤失败也能下载）
+        uses: actions/upload-artifact@v4
+        with:
+          name: video2markdown-windows-x64
+          path: packaging/video2markdown-windows-x64.zip
+          retention-days: 14
+
+      - name: 发布到 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packaging/video2markdown-windows-x64.zip
+          generate_release_notes: true
+          body: |
+            Windows 绿色版，解压即可运行 —— 不需要安装 Python，不需要 pip。
+
+            **使用**：解压 → 双击 `video2markdown.exe` → 粘贴链接 → 开始生成。
+
+            首次运行会自动下载 Whisper 模型（约 484MB，走国内镜像）。
+            想要 GPU 加速，见压缩包内的 `使用说明.txt`。

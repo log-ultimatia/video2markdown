@@ -42,10 +42,22 @@ import diarize
 # ---------------------------------------------------------------------------
 # 路径与默认配置
 # ---------------------------------------------------------------------------
+# 资源目录（只读）：代码、字体、模板之类。
 LAB_DIR = Path(__file__).resolve().parent
-DOWNLOAD_DIR = LAB_DIR / "downloads"
-AUDIO_DIR = LAB_DIR / "audio"
-OUTPUT_DIR = LAB_DIR / "output"
+
+# 数据目录（可写）：下载的音频、提取的 wav、生成的 Markdown、模型缓存。
+#
+# 打包成 exe 后 PyInstaller 把资源放在 _internal\，那里放用户文件很不友好
+# （用户根本找不到自己的输出）。所以冻结时把数据目录挪到 exe 旁边：
+#   video2markdown#     video2markdown.exe
+#     _internal\           <- 程序资源
+#     output\  audio\  downloads\  models\   <- 用户能看到
+FROZEN = bool(getattr(sys, "frozen", False))
+DATA_DIR = Path(sys.executable).parent if FROZEN else LAB_DIR
+
+DOWNLOAD_DIR = DATA_DIR / "downloads"
+AUDIO_DIR = DATA_DIR / "audio"
+OUTPUT_DIR = DATA_DIR / "output"
 
 # 模型缓存目录。
 # 为什么不用默认的 ~/.cache/huggingface：
@@ -54,7 +66,7 @@ OUTPUT_DIR = LAB_DIR / "output"
 #   · 阶段三要复用同一个模型做对比，放这里更好找
 # 想改成共享缓存： set Y2M_MODEL_DIR=D:\models
 _MODEL_DIR_ENV = os.environ.get("Y2M_MODEL_DIR", "").strip()
-MODEL_DIR = Path(_MODEL_DIR_ENV) if _MODEL_DIR_ENV else (LAB_DIR / "models")
+MODEL_DIR = Path(_MODEL_DIR_ENV) if _MODEL_DIR_ENV else (DATA_DIR / "models")
 
 # 只把 download_root 指到 MODEL_DIR 还不够。
 # huggingface_hub 会把【元数据、blob 索引、xet 传输缓存】另外写到 HF_HOME
