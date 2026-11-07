@@ -32,6 +32,21 @@ import sys
 
 FROZEN = bool(getattr(sys, "frozen", False))
 
+# 【必须】强制行缓冲。
+#
+# 开发模式靠 `python -u pipeline.py` 拿到不缓冲的输出；打包成 exe 后没法传 -u
+# （v2m-cli.exe 不是 python），于是回退到 8KB 块缓冲 ——
+# 表现是界面上只出现"立刻写到 stderr"的警告，而 print 出来的标题、阶段进度
+# 全卡在缓冲区里，看起来像卡死了。
+#
+# 用户实测：日志区只有一行 huggingface 的 warning，总耗时已经 45 秒但阶段面板
+# 全是 ⏳，就是这个原因。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+
 
 def _drop_dispatch_arg(name: str) -> None:
     """去掉 argv 里的分派参数，让被调模块看到自己期望的 argv。"""

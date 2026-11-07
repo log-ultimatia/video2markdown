@@ -76,6 +76,9 @@ MODEL_DIR = Path(_MODEL_DIR_ENV) if _MODEL_DIR_ENV else (DATA_DIR / "models")
 os.environ.setdefault("HF_HOME", str(MODEL_DIR / ".hf"))
 # CLI and GUI should use the same mirror default. Explicit user configuration wins.
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+# 压掉"你在匿名下载，建议设 HF_TOKEN"这类提示。
+# 我们是故意不要求 token 的（工具定位就是不要 key），这条警告只会让用户困惑。
+os.environ.setdefault("HF_HUB_VERBOSITY", "error")
 
 # 同理：Windows 没开"开发者模式"时 huggingface_hub 建不了符号链接，
 # 每次都会打一段二十行的警告。功能不受影响（退化成一字一份副本），
