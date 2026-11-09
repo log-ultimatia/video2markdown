@@ -254,111 +254,19 @@ class App:
 
     # ---- 界面骨架 ----
     def _build(self) -> None:
-        """
-        整体骨架：左侧导航栏 + 右侧内容页。
+        outer = tk.Frame(self.root, bg=C_BG)
+        outer.pack(fill="both", expand=True)
 
-        之前是"从上到下一条龙"，所有区块堆在一起，页面上没有层次。
-        现在参考常见桌面应用的样子：左边一条固定导航，右边是页面区，
-        切换页面只换内容，窗口不抖。
-        """
-        shell = tk.Frame(self.root, bg=C_BG)
-        shell.pack(fill="both", expand=True)
+        self._build_header(outer)
+        body = tk.Frame(outer, bg=C_BG)
+        body.pack(fill="both", expand=True, padx=18, pady=(8, 12))
 
-        self._build_sidebar(shell)
-
-        # 侧栏和内容之间的 1px 分隔线
-        tk.Frame(shell, bg=C_BORDER, width=1).pack(side="left", fill="y")
-
-        content = tk.Frame(shell, bg=C_BG)
-        content.pack(side="left", fill="both", expand=True)
-        content.grid_rowconfigure(0, weight=1)
-        content.grid_columnconfigure(0, weight=1)
-
-        # 所有页面叠在同一格里，靠 tkraise() 切换 —— 换页时窗口尺寸不跳
-        self.pages: dict[str, tk.Frame] = {}
-        for name in ("gen", "log"):
-            page = tk.Frame(content, bg=C_BG)
-            page.grid(row=0, column=0, sticky="nsew")
-            self.pages[name] = page
-
-        gen = tk.Frame(self.pages["gen"], bg=C_BG)
-        gen.pack(fill="both", expand=True, padx=26, pady=(16, 18))
-        self._build_header(gen)
-        self._build_source(gen)
-        self._build_actions(gen)
-        self._build_outputs(gen)
-
-        logp = tk.Frame(self.pages["log"], bg=C_BG)
-        logp.pack(fill="both", expand=True, padx=26, pady=(16, 18))
-        self._build_log(logp)
-
-        self._show_page("gen")
+        self._build_source(body)
+        self._build_actions(body)
+        self._build_outputs(body)
+        self._build_log(body)
         self._fit_window()
 
-    # ==================================================================
-    # 侧边导航
-    # ==================================================================
-    def _build_sidebar(self, parent) -> None:
-        bar = tk.Frame(parent, bg="#ffffff", width=188)
-        bar.pack(side="left", fill="y")
-        bar.pack_propagate(False)
-
-        # 品牌区
-        brand = tk.Frame(bar, bg="#ffffff")
-        brand.pack(fill="x", padx=18, pady=(20, 18))
-        tk.Label(brand, text="YouTube → Markdown", bg="#ffffff", fg=C_TEXT,
-                 font=("Microsoft YaHei UI", 11, "bold"),
-                 justify="left").pack(anchor="w")
-        tk.Label(brand, text="视频转 Markdown 笔记", bg="#ffffff", fg=C_MUTED,
-                 font=("Microsoft YaHei UI", 8)).pack(anchor="w", pady=(3, 0))
-
-        self._nav_items: dict[str, tk.Frame] = {}
-        self._nav_labels: dict[str, tk.Label] = {}
-
-        def nav(key: str, icon: str, text: str) -> None:
-            row = tk.Frame(bar, bg="#ffffff", cursor="hand2")
-            row.pack(fill="x", padx=10, pady=1)
-            lbl = tk.Label(row, text=f"  {icon}   {text}", bg="#ffffff",
-                           fg=C_MUTED, font=("Microsoft YaHei UI", 9),
-                           anchor="w", padx=8, pady=7)
-            lbl.pack(fill="x")
-            for w in (row, lbl):
-                w.bind("<Button-1>", lambda _e, k=key: self._show_page(k))
-            self._nav_items[key] = row
-            self._nav_labels[key] = lbl
-
-        nav("gen", "▶", "生成")
-        nav("log", "≡", "运行日志")
-
-        # 分隔 + 设置（打开对话框，不占页面）
-        tk.Frame(bar, bg=C_BORDER, height=1).pack(fill="x", padx=18, pady=12)
-
-        setrow = tk.Frame(bar, bg="#ffffff", cursor="hand2")
-        setrow.pack(fill="x", padx=10, pady=1)
-        setlbl = tk.Label(setrow, text="  ⚙   更多设置", bg="#ffffff", fg=C_MUTED,
-                          font=("Microsoft YaHei UI", 9), anchor="w", padx=8, pady=7)
-        setlbl.pack(fill="x")
-        for w in (setrow, setlbl):
-            w.bind("<Button-1>", lambda _e: self._open_settings())
-
-        # 底部版本信息
-        tk.Label(bar, text="v1.1   ·   本地运行", bg="#ffffff", fg="#94a3b8",
-                 font=("Microsoft YaHei UI", 8)).pack(side="bottom", anchor="w",
-                                                     padx=20, pady=16)
-
-    def _show_page(self, name: str) -> None:
-        """切换页面 + 更新导航高亮。"""
-        if name not in self.pages:
-            return
-        self.pages[name].tkraise()
-        self._current_page = name
-        for key, row in self._nav_items.items():
-            active = (key == name)
-            bg = "#eef2ff" if active else "#ffffff"
-            row.configure(bg=bg)
-            self._nav_labels[key].configure(
-                bg=bg, fg=C_ACCENT if active else C_MUTED,
-                font=("Microsoft YaHei UI", 9, "bold" if active else "normal"))
     def _fit_window(self) -> None:
         """
         按【内容实际需求】决定窗口大小。
@@ -869,22 +777,23 @@ class App:
         self.tree.bind("<<TreeviewSelect>>", lambda _e: self._preview_selected())
 
     def _build_log(self, parent) -> None:
-        ttk.Label(parent, text="运行日志", style="Section.TLabel").pack(
-            anchor="w", pady=(0, 8))
+        ttk.Label(parent, text="③ 运行日志", style="Section.TLabel").pack(
+            anchor="w", pady=(12, 5))
 
-        # 浅色日志面板。
-        # 原来是 #101822 近黑底 + 亮色字，和白卡片挨在一起对比太硬（用户反馈）。
-        # 改成浅灰底 #f8fafc + 中性深灰字，和整体设计语言一致；
-        # 语义色也改成"浅底上能看清"的深色调，而不是深底上的荧光色。
         wrap = tk.Frame(parent, bg=C_CARD, highlightbackground=C_BORDER,
                         highlightthickness=1)
         wrap.pack(fill="both", expand=True)
+        wrap.pack_propagate(False)
+        wrap.configure(height=170)
 
+        # 浅色日志面板。
+        # 用户反馈：原来是 #101822 近黑底 + 亮色字，和白卡片摆在一起对比太硬。
+        # 改成浅灰底 + 中性深灰字，语义色换成"浅底上能看清"的深色调。
         self.log = tk.Text(wrap, height=10, font=MONO_FONT, bg="#f8fafc",
                            fg="#334155", relief="flat", wrap="none",
-                           insertbackground=C_TEXT, padx=12, pady=10,
+                           insertbackground=C_TEXT, padx=10, pady=8,
                            selectbackground="#dbeafe")
-        self.log.pack(side="left", fill="both", expand=True, padx=(1, 0),
+        self.log.pack(side="left", fill="both", expand=True, padx=1,
                       pady=1)
         lsb = ttk.Scrollbar(wrap, orient="vertical", command=self.log.yview)
         self.log.configure(yscrollcommand=lsb.set)
