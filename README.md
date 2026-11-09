@@ -57,7 +57,7 @@
 **前提：电脑有 NVIDIA 显卡。**
 
 ### 第 1 步
-在 Releases 页面额外下载 **`video2markdown-gpu-addon.zip`**（约 900 MB）。
+在 Releases 页面额外下载 **`video2markdown-gpu-addon.zip`**（约 1.3 GB）。
 
 ### 第 2 步
 把它解压到**和 `video2markdown.exe` 同一个文件夹**里，
