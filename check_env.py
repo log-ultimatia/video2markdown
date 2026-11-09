@@ -311,8 +311,14 @@ def _cuda_runtime_available() -> bool:
 
     handles = []
     if hasattr(os, "add_dll_directory"):
-        for entry in sys.path:
-            nvidia_dir = Path(entry) / "nvidia"
+        # 除了 site-packages/nvidia，还要扫【exe 旁边的 nvidia\】——
+        # 打包版的 CUDA 是可选附加包，解压到 exe 同目录即可生效。
+        scan_roots = [Path(e) / "nvidia" for e in sys.path]
+        try:
+            scan_roots.append(Path(sys.executable).resolve().parent / "nvidia")
+        except OSError:
+            pass
+        for nvidia_dir in scan_roots:
             if not nvidia_dir.is_dir():
                 continue
             for dll_dir in nvidia_dir.glob("*/bin"):

@@ -716,10 +716,19 @@ def _cuda_libs_present() -> bool:
     # pip NVIDIA wheels install DLLs under site-packages/nvidia/*/bin, which
     # Windows does not search automatically when loading by DLL name.
     if hasattr(os, "add_dll_directory"):
-        for entry in sys.path:
-            nvidia_dir = Path(entry) / "nvidia"
-            if not nvidia_dir.is_dir():
+        candidates = [Path(e) / "nvidia" for e in sys.path]
+        # 打包版：CUDA 库作为【可选附加包】放在 exe 旁边的 nvidia\ 目录里。
+        # 主包不带它（那要 2GB），用户想要 GPU 加速就下载附加包解压到同一目录。
+        candidates.append(DATA_DIR / "nvidia")
+        seen = set()
+        for nvidia_dir in candidates:
+            try:
+                key = str(nvidia_dir.resolve()).lower()
+            except OSError:
                 continue
+            if key in seen or not nvidia_dir.is_dir():
+                continue
+            seen.add(key)
             for dll_dir in nvidia_dir.glob("*/bin"):
                 try:
                     _CUDA_DLL_DIR_HANDLES.append(
